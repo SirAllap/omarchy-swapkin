@@ -21,8 +21,7 @@ message.
 - **Pace, not just a percentage.** `Day 4/7 · budget 48% · 5% ahead of pace`,
   and, when the maths says so, `At this pace it runs out in 3d 0h`.
 - **A watchdog while the panel is closed.** It warns once when the active
-  account passes your threshold, and hands over to the account with the most
-  room when that one is spent.
+  account passes your threshold. Hand-over when an account is spent is opt-in.
 - **Today's tokens at API prices**, as an estimate you can sanity-check.
 
 ## Requirements
@@ -98,12 +97,13 @@ Two details that matter:
 Behaviour lives in `~/.local/share/swapkin/config.json`:
 
 ```json
-{ "alertAt": 90, "autoSwitch": true }
+{ "alertAt": 90, "autoSwitch": false }
 ```
 
 - `alertAt` — the weekly percentage that triggers one desktop warning per window.
-- `autoSwitch` — when the active account hits 100%, hand over to the account with
-  the most room left. Set it to `false` to be asked instead of moved.
+- `autoSwitch` — off by default. Turn it on and a spent account hands over to the
+  account with the most room left, with a notification saying so. Left off, you
+  get the warning and decide yourself.
 
 The watchdog interval is a widget setting:
 

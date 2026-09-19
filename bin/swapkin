@@ -319,7 +319,8 @@ check() {
   awk -v p="$pct" 'BEGIN{exit !(p >= 0)}' || return 0
 
   local warn_at; warn_at=$(setting alertAt 90)
-  local auto_switch; auto_switch=$(setting autoSwitch true)
+  # Off by default: taking over an account is the user's call, not the plugin's.
+  local auto_switch; auto_switch=$(setting autoSwitch false)
   local reset; reset=$(jq -r '[.limits[]? | select((.label // "") | ascii_downcase | test("week"))][0].resetsAt // ""' "$ACCOUNTS/$cur/usage.json" 2>/dev/null)
   local last; last=$(jq -r --arg a "$cur" --arg r "$reset" '.[$a][$r] // 0' "$STATE_FILE" 2>/dev/null || echo 0)
   local stage=0
