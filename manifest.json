@@ -1,0 +1,92 @@
+{
+  "schemaVersion": 1,
+  "id": "io.github.sirallap.swapkin",
+  "name": "Swapkin",
+  "version": "0.1.0",
+  "author": "SirAllap",
+  "license": "MIT",
+  "description": "Claude Code usage in the Omarchy bar, with one-click switching between several Claude accounts that share one ~/.claude.",
+  "kinds": [
+    "bar-widget",
+    "service"
+  ],
+  "activation": "on-demand",
+  "entryPoints": {
+    "barWidget": "Panel.qml",
+    "service": "Service.qml"
+  },
+  "barWidget": {
+    "displayName": "Swapkin",
+    "description": "Claude Code limits, weekly pace and token history, plus switching between your Claude accounts. The idle account's limits stay visible, dimmed.",
+    "category": "AI",
+    "aliases": [
+      "agents",
+      "claude",
+      "accounts",
+      "model-usage"
+    ],
+    "allowMultiple": false,
+    "defaults": {
+      "refreshIntervalSec": 900,
+      "syncMode": "Off",
+      "syncDir": "",
+      "syncFileName": "",
+      "syncDeviceId": "",
+      "watchIntervalMin": 5
+    },
+    "schema": [
+      {
+        "key": "refreshIntervalSec",
+        "type": "integer",
+        "label": "Refresh interval (seconds)",
+        "min": 30,
+        "max": 3600,
+        "step": 30,
+        "defaultValue": 900
+      },
+      {
+        "key": "syncMode",
+        "type": "enum",
+        "label": "Synced aggregation",
+        "options": [
+          "Off",
+          "On"
+        ],
+        "defaultValue": "Off",
+        "description": "When On, write this machine's local usage snapshot and merge snapshots from other machines."
+      },
+      {
+        "key": "syncDir",
+        "type": "path",
+        "label": "Sync folder",
+        "defaultValue": "",
+        "description": "A folder synced by Syncthing, Dropbox, rsync, etc."
+      },
+      {
+        "key": "syncFileName",
+        "type": "string",
+        "label": "Snapshot file name",
+        "defaultValue": "",
+        "description": "Optional. Defaults to <hostname>.json. Use a different file name on each machine, such as laptop.json or desktop.json."
+      },
+      {
+        "key": "syncDeviceId",
+        "type": "string",
+        "label": "Device id",
+        "defaultValue": "",
+        "description": "Optional stable device name used inside synced aggregate snapshots."
+      },
+      {
+        "key": "watchIntervalMin",
+        "type": "integer",
+        "label": "Watchdog interval (minutes)",
+        "min": 1,
+        "max": 120,
+        "step": 1,
+        "defaultValue": 5,
+        "description": "How often Swapkin refreshes limits in the background, warns near the cap, and hands over when an account is spent."
+      }
+    ]
+  },
+  "keepLoaded": true
+}
