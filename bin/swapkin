@@ -284,9 +284,29 @@ setting() { # key default
   jq -r --arg k "$1" --arg d "$2" '.[$k] // $d' "$CONFIG" 2>/dev/null || echo "$2"
 }
 
-notify() { # title body
+# Same two-circle mark the panel draws for this account: a solid disc in its
+# colour overlapped by an outline ring, so the notification icon tracks
+# whichever account it's actually about.
+icon_for() { # account
+  local colour; colour=$(colour_of "${1:-}")
+  [[ $colour =~ ^#[0-9a-fA-F]{6}$ ]] || colour="#d97757"
+  local dir="$ACCOUNTS/.cache" file
+  mkdir -p "$dir"
+  file="$dir/icon-${1:-default}.svg"
+  # Square canvas: notification daemons slot icons into a square frame and
+  # crop a wider one, which is what clipped the previous non-square version.
+  cat > "$file" <<SVG
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 40 40">
+  <circle cx="15" cy="20" r="10" fill="$colour"/>
+  <circle cx="25" cy="20" r="10" fill="none" stroke="#cacccc" stroke-width="4"/>
+</svg>
+SVG
+  echo "$file"
+}
+
+notify() { # title body account
   command -v notify-send >/dev/null || return 0
-  notify-send --app-name=Swapkin --icon=preferences-desktop-user "$1" "$2" || true
+  notify-send --app-name=Swapkin --icon="$(icon_for "${3:-}")" "$1" "$2" || true
 }
 
 weekly_of() { # account
@@ -321,7 +341,10 @@ check() {
   local warn_at; warn_at=$(setting alertAt 90)
   # Off by default: taking over an account is the user's call, not the plugin's.
   local auto_switch; auto_switch=$(setting autoSwitch false)
-  local reset; reset=$(jq -r '[.limits[]? | select((.label // "") | ascii_downcase | test("week"))][0].resetsAt // ""' "$ACCOUNTS/$cur/usage.json" 2>/dev/null)
+  # Date only: the API restamps this to the current instant on every fetch,
+  # so keying on the full value would treat each check() run as a new window
+  # and re-notify every time instead of once per real reset.
+  local reset; reset=$(jq -r '[.limits[]? | select((.label // "") | ascii_downcase | test("week"))][0].resetsAt // ""' "$ACCOUNTS/$cur/usage.json" 2>/dev/null | cut -c1-10)
   local last; last=$(jq -r --arg a "$cur" --arg r "$reset" '.[$a][$r] // 0' "$STATE_FILE" 2>/dev/null || echo 0)
   local stage=0
   awk -v p="$pct" -v w="$warn_at" 'BEGIN{exit !(p * 100 >= w)}' && stage=1
@@ -337,14 +360,14 @@ check() {
   fi
   if (( stage == 2 )) && [[ $auto_switch == true && -n $other ]]; then
     use "$other" >/dev/null
-    notify "Switched to $other" "$cur ran out of weekly quota. Open sessions follow on their next message."
+    notify "Switched to $other" "$cur ran out of weekly quota. Open sessions follow on their next message." "$other"
   elif (( stage >= 1 )); then
     local pretty; pretty=$(awk -v p="$pct" 'BEGIN{printf "%d", p * 100}')
     if [[ -n $other ]]; then
       local free; free=$(awk -v p="$(weekly_of "$other")" 'BEGIN{printf "%d", (1 - p) * 100}')
-      notify "$cur is at ${pretty}% of its week" "$other has ${free}% free. Switch from the bar, or press a in the panel."
+      notify "$cur is at ${pretty}% of its week" "$other has ${free}% free. Switch from the bar, or press a in the panel." "$cur"
     else
-      notify "$cur is at ${pretty}% of its week" "No other account has room right now."
+      notify "$cur is at ${pretty}% of its week" "No other account has room right now." "$cur"
     fi
   fi
 

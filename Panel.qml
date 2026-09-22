@@ -640,8 +640,12 @@ Panel {
 
         Column {
           id: column
-          // Leave a lane for the scroll bar so it never sits on top of the numbers.
-          width: panelFlick.width - (panelFlick.interactive ? panelScrollBar.width + Style.space(8) : 0)
+          // The panel already pads all four sides evenly (root.padding). Only
+          // add a mirrored lane for the scroll bar, split the same on both
+          // sides, so left/right end up flush with top/bottom, not wider.
+          readonly property real barLane: panelFlick.interactive ? panelScrollBar.width : 0
+          x: barLane
+          width: panelFlick.width - barLane * 2
           spacing: Style.space(12)
 
           // ---------- Hero: provider mark · name · plan ----------
