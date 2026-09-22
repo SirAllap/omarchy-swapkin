@@ -5,7 +5,7 @@
   "version": "0.1.0",
   "author": "SirAllap",
   "license": "MIT",
-  "description": "Claude Code usage in the Omarchy bar, with one-click switching between several Claude accounts that share one ~/.claude.",
+  "description": "Never get blocked by Claude Code limits again — Swapkin tracks weekly pace across every account and switches between them from the Omarchy bar in one click.",
   "kinds": [
     "bar-widget",
     "service"
