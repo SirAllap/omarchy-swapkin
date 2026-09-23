@@ -46,6 +46,7 @@ profiles() {
 
 # Each account carries a colour so it is recognisable at a glance in the bar,
 # in the list and in the Claude Code status line.
+ICONS="$(dirname "$(readlink -f "$0")")/../icons"
 PALETTE=("#7fa7d9" "#d97757" "#8fb572" "#d9a54a" "#b98fd9" "#6fc7c0" "#d98fa8" "#a8a35c" "#7f8fd9" "#c98f6f")
 
 colour_taken() { # colour [account to ignore]
@@ -285,32 +286,17 @@ setting() { # key default
 }
 
 # Same two-circle mark the panel draws for this account: a solid disc in its
-# colour overlapped by an outline ring, so the notification icon tracks
-# whichever account it's actually about.
+# colour overlapped by an outline ring. One icon per palette colour ships with
+# the plugin, so nothing is written to disk to show a notification. A colour
+# outside the palette gets the neutral mark.
 icon_for() { # account
-  local name=${1:-default}
-  # The name becomes part of a file path: accept only what `add` accepts.
-  [[ $name =~ ^[a-z0-9][a-z0-9_-]{0,31}$ ]] || name=default
-  local colour; colour=$(colour_of "$name")
-  [[ $colour =~ ^#[0-9a-fA-F]{6}$ ]] || colour="#d97757"
-  local dir="$ACCOUNTS/.cache" file tmp
-  # Private, ours, and a real directory, or no icon at all.
-  mkdir -p -m 700 "$dir" 2>/dev/null
-  [[ -d $dir && ! -L $dir && -O $dir ]] || return 0
-  file="$dir/icon-$name.svg"
-  # Stage under a fresh name (mktemp creates it exclusively) and rename over
-  # the target: rename replaces a symlink rather than writing through it.
-  tmp=$(mktemp "$dir/.icon.XXXXXX") || return 0
-  # Square canvas: notification daemons slot icons into a square frame and
-  # crop a wider one, which is what clipped the previous non-square version.
-  cat > "$tmp" <<SVG
-<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 40 40">
-  <circle cx="15" cy="20" r="10" fill="$colour"/>
-  <circle cx="25" cy="20" r="10" fill="none" stroke="#cacccc" stroke-width="4"/>
-</svg>
-SVG
-  mv -f -T "$tmp" "$file" || { rm -f "$tmp"; return 0; }
-  echo "$file"
+  local colour="" c
+  [[ ${1:-} =~ ^[a-z0-9][a-z0-9_-]{0,31}$ ]] && colour=$(colour_of "$1")
+  colour=${colour,,}
+  for c in "${PALETTE[@]}"; do
+    [[ $c == "$colour" ]] && { echo "$ICONS/account-${c#\#}.svg"; return; }
+  done
+  echo "$ICONS/account-default.svg"
 }
 
 notify() { # title body account
