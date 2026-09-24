@@ -1258,7 +1258,7 @@ Panel {
                   // a second, and a silent stale number is worse than saying so.
                   text: (root.hasAccounts && !!root.candidate ? root.candidate.name.toUpperCase() + " · " + root.accountPlan(root.candidate).toUpperCase()
                                            : "LIMITS")
-                    + (root.hasAccounts && !root.candidate.active ? " · PREVIEW" : "")
+                    + (root.hasAccounts && !!root.candidate && !root.candidate.active ? " · PREVIEW" : "")
                     + (root.accountsRefreshing ? " · UPDATING" : "")
                   foreground: root.foreground
                   fontFamily: root.fontFamily
