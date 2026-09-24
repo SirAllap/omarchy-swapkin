@@ -21,6 +21,55 @@ Item {
   property var agents: []
   property int dataRevision: 0
 
+  // ------------------------------------------------------------- swapkin
+  //
+  // The provider roster and account state come from swapkin itself, not from
+  // the usage records: a cold provider like Codex never writes one.
+
+  readonly property string swapkinTool: Qt.resolvedUrl("bin/swapkin").toString().replace(/^file:\/\//, "")
+  property var swapkinData: ({ demo: false, providers: [] })
+  property int swapkinRevision: 0
+  readonly property bool swapkinLoading: swapkinProvidersProcess.running
+
+  Process {
+    id: swapkinProvidersProcess
+    running: false
+    command: [root.swapkinTool, "providers", "--json"]
+
+    stdout: StdioCollector {
+      waitForEnd: true
+      onStreamFinished: root.applySwapkinProviders(text)
+    }
+  }
+
+  function reloadSwapkin() {
+    if (!swapkinProvidersProcess.running) swapkinProvidersProcess.running = true
+  }
+
+  function applySwapkinProviders(output) {
+    // A parse failure or an empty listing (a crashed or briefly-corrupt
+    // `providers --json`) must never blank the panel: keep whatever the
+    // last good listing was instead of clearing providers to [].
+    var raw = String(output || "").trim()
+    if (raw === "") return
+    try {
+      var parsed = JSON.parse(raw)
+      if (parsed && typeof parsed === "object") swapkinData = parsed
+      else return
+    } catch (e) {
+      console.warn("swapkin", "Ignoring bad providers listing", e)
+      return
+    }
+    swapkinRevision++
+  }
+
+  function swapkinProviderById(id) {
+    var list = swapkinData && swapkinData.providers ? swapkinData.providers : []
+    for (var i = 0; i < list.length; i++)
+      if (list[i] && String(list[i].id) === id) return list[i]
+    return null
+  }
+
   Process {
     id: listProcess
     running: false
@@ -109,6 +158,7 @@ Item {
 
   Component.onCompleted: {
     rescanAgents()
+    reloadSwapkin()
     if (syncConfigured()) scheduleSync()
   }
 
@@ -122,7 +172,10 @@ Item {
     running: true
     repeat: true
     triggeredOnStart: true
-    onTriggered: root.runUpdate("normal")
+    onTriggered: {
+      root.runUpdate("normal")
+      root.reloadSwapkin()
+    }
   }
 
   Process {
@@ -163,7 +216,7 @@ Item {
     updateProcess.running = true
   }
 
-  function refresh() { refreshAll(true) }
+  function refresh() { refreshAll(true); reloadSwapkin() }
   function refreshAll(force) { runUpdate(force === true ? "force" : "normal") }
 
   // Opening the panel wants the numbers that go stale on the wire, not
@@ -180,7 +233,24 @@ Item {
   property var enabledProviders: {
     var rev = dataRevision
     var syncRev = syncRevision
+    var swapRev = swapkinRevision
     var result = []
+    var swapList = swapkinData && swapkinData.providers ? swapkinData.providers : []
+
+    if (swapkinData && swapkinData.demo === true) {
+      // Demo mode never shows this machine's real records, only swapkin's
+      // own invented stats — so a demo screenshot can't leak real data.
+      for (var d = 0; d < swapList.length; d++) {
+        var dp = swapList[d] || {}
+        var demoRecord = { id: dp.id, name: dp.name }
+        var demoStats = dp.stats || {}
+        for (var key in demoStats) demoRecord[key] = demoStats[key]
+        var demoDisplay = displayProvider(demoRecord)
+        if (providerHasData(demoDisplay)) result.push(demoDisplay)
+      }
+      return result
+    }
+
     var localIds = {}
     for (var i = 0; i < agents.length; i++) {
       var record = agents[i] ? agents[i].record : null
@@ -201,20 +271,40 @@ Item {
       var syncedDisplay = displayProvider({ id: syncedId, name: stats.providerName || syncedId })
       if (providerHasData(syncedDisplay)) result.push(syncedDisplay)
     }
+
+    // A swapkin provider with saved accounts but no local usage record (Codex,
+    // Copilot, a custom tool — nothing writes those into the agents usage
+    // dir) still deserves a tab.
+    for (var s = 0; s < swapList.length; s++) {
+      var sp = swapList[s] || {}
+      var spId = String(sp.id || "")
+      if (spId === "" || localIds[spId]) continue
+      var spDisplay = displayProvider({ id: spId, name: sp.name || spId })
+      if (providerHasData(spDisplay)) result.push(spDisplay)
+    }
+
     return result
   }
 
+  // A provider earns a place only by being something swapkin actually knows
+  // about — that keeps synced records for a retired or unrelated agent (say,
+  // an old Fireworks record) out of the panel.
   function providerEnabled(id) {
-    return id === "claude"
+    // Claude is the default provider and always shown, whatever swapkin's
+    // providers listing currently says (a bad usage.json must never drop it).
+    if (id === "claude") return true
+    return !!swapkinProviderById(id)
   }
 
   // All-time keeps a quiet day from hiding an agent; today's counts admit a
   // machine whose only source is history.jsonl, which knows nothing older.
+  // Saved accounts count too: a cold provider like Codex may have no usage
+  // record at all and still be worth a tab.
   function providerHasData(p) {
     return numberValue(p.totalPrompts) > 0 || numberValue(p.totalSessions) > 0
       || numberValue(p.activeDays) > 0 || numberValue(p.todayPrompts) > 0
       || numberValue(p.todaySessions) > 0 || (p.limits && p.limits.length > 0)
-      || !!p.balance
+      || !!p.balance || (p.accounts && p.accounts.length > 0)
   }
 
   // A prepaid agent's credit ledger. Like rate limits, the balance is
@@ -234,13 +324,15 @@ Item {
   }
 
   function displayProvider(record) {
-    var stats = syncedStatsFor(String(record.id))
+    var id = String(record.id)
+    var sp = swapkinProviderById(id)
+    var stats = syncedStatsFor(id)
     var synced = !!stats
     var deviceCount = synced ? Number(stats.deviceCount || aggregateData.deviceCount || 0) : 0
 
     return {
-      providerId: String(record.id),
-      providerName: String(record.name || record.id),
+      providerId: id,
+      providerName: String(record.name || (sp && sp.name) || id),
       ready: record.ready === true || synced,
       usageStatusText: String(record.usageStatusText || ""),
       authHelpText: String(record.authHelpText || ""),
@@ -265,7 +357,18 @@ Item {
 
       syncEnabled: synced,
       syncDeviceCount: deviceCount,
-      syncUpdatedAt: aggregateData && aggregateData.updatedAt ? aggregateData.updatedAt : ""
+      syncUpdatedAt: aggregateData && aggregateData.updatedAt ? aggregateData.updatedAt : "",
+
+      // swapkin fields: safe defaults so a provider swapkin has never heard
+      // of (a synced-only record from another device) still renders.
+      accounts: sp && Array.isArray(sp.accounts) ? sp.accounts : [],
+      mode: sp ? String(sp.mode || "") : "",
+      modeLabel: sp ? String(sp.modeLabel || "") : "",
+      modeWords: sp ? String(sp.modeWords || "") : "",
+      sessions: sp ? numberValue(sp.sessions) : 0,
+      store: sp ? String(sp.store || "") : "",
+      how: sp ? String(sp.how || "") : "",
+      addHint: sp ? String(sp.addHint || "") : ""
     }
   }
 

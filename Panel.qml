@@ -41,7 +41,7 @@ Panel {
   // record: right after a switch that record still holds the other account's
   // figures, and showing those is worse than showing nothing.
   readonly property var limits: providerWindows(provider, candidate)
-  readonly property bool accountsRefreshing: accountsProcess.running || probeProcess.running
+  readonly property bool accountsRefreshing: usage.swapkinLoading || probeProcess.running
   readonly property var models: modelRows(provider)
   readonly property var headline: tightest(limits)
   readonly property var balance: provider ? (provider.balance || null) : null
@@ -138,13 +138,14 @@ Panel {
     return best
   }
 
-  // A provider's windows. For Claude they come from the account being read, not
-  // from the shared collector record: right after a switch that record still
-  // holds the other account's figures, and showing those is worse than nothing.
+  // A provider's windows. For any provider with accounts they come from the
+  // account being read, not from the shared collector record: right after a
+  // switch that record still holds the other account's figures, and showing
+  // those is worse than nothing.
   function providerWindows(p, account) {
     // Another account has its own figures or none: the active account's must
     // never show under its name. The active one falls back to the record.
-    if (p && p.providerId === "claude" && account && (!account.active || (account.limits || []).length > 0))
+    if (p && (p.accounts || []).length > 0 && account && (!account.active || (account.limits || []).length > 0))
       return limitWindows(account)
     return limitWindows(p)
   }
@@ -333,18 +334,27 @@ Panel {
   }
 
   // ------------------------------------------------------------- accounts
-  // Accounts are saved by the bundled swapkin tool. Switching swaps the Claude
-  // login inside one shared config dir, so settings, sessions and MCP logins are
-  // untouched and open sessions pick up the new account on their next request.
+  // Accounts are saved by the bundled swapkin tool, one adapter per provider.
+  // A hot provider (Claude) swaps the login file in place; a cold one only
+  // moves the active pointer for new sessions; a never provider needs a
+  // fresh sign-in. providerWindows/switchNoteText read provider.mode to tell
+  // which applies.
   readonly property string accountTool: Qt.resolvedUrl("bin/swapkin").toString().replace(/^file:\/\//, "")
   readonly property var palette: ["#7fa7d9", "#d97757", "#8fb572", "#d9a54a", "#b98fd9",
                                   "#6fc7c0", "#d98fa8", "#a8a35c", "#7f8fd9", "#c98f6f"]
-  property var accounts: []
+  // The selected provider's own accounts, straight off swapkin's listing —
+  // no separate `list --json` process to keep in sync.
+  readonly property var accounts: provider ? (provider.accounts || []) : []
   property bool managing: false
   property string colourEditing: ""
-  readonly property bool hasAccounts: !!provider && provider.providerId === "claude" && accounts.length > 0
+  readonly property bool hasAccounts: accounts.length > 0
   readonly property var activeAccount: {
     for (var i = 0; i < accounts.length; i++) if (accounts[i].active) return accounts[i]
+    return null
+  }
+  function activeAccountFor(p) {
+    var list = p ? (p.accounts || []) : []
+    for (var i = 0; i < list.length; i++) if (list[i].active) return list[i]
     return null
   }
   // The account being looked at: the active one until you move to another. It
@@ -358,6 +368,17 @@ Panel {
   // not throw away the account you are looking at.
   readonly property string activeName: activeAccount ? activeAccount.name : ""
   onActiveNameChanged: candName = ""
+
+  // A different provider is a different account list; the account and the
+  // manage view you were looking at belong to the one you left. Keyed on the
+  // provider's own id, not its slot: if the provider at index 0 drops out
+  // (a malformed usage.json, say) and another one takes its place, candName
+  // must not survive and match a same-named account of the new provider (L9).
+  readonly property string providerId: provider ? provider.providerId : ""
+  onProviderIdChanged: {
+    candName = ""
+    managing = false
+  }
 
   function stepCandidate(direction) {
     if (accounts.length < 2 || !candidate) return
@@ -384,20 +405,30 @@ Panel {
     return peak ? " · " + Math.round(peak.percent * 100) + "% peak" : ""
   }
 
-  // Providers whose paying account Swapkin knows, for the strip on top.
+  // One chip per provider whose paying account Swapkin knows, for the strip
+  // on top.
   readonly property var payers: {
     var out = []
     for (var i = 0; i < providers.length; i++) {
-      if (providers[i].providerId === "claude" && activeAccount)
-        out.push({ providerId: "claude", providerName: providers[i].providerName,
-                   payer: activeAccount.name, tint: accountColour(activeAccount) })
+      var p = providers[i]
+      var active = activeAccountFor(p)
+      if (active) out.push({ providerId: p.providerId, providerName: p.providerName,
+                              payer: active.name, tint: accountColour(active, p.accounts) })
     }
     return out
   }
 
+  // Open sessions catch up on their own; a switch that needs a fresh sign-in
+  // never picks anything up automatically.
   function switchNoteText() {
     if (!candidate) return ""
-    if (!candidate.active) return "Open sessions use " + candidate.name + " on their next message."
+    if (!candidate.active) {
+      var mode = root.provider ? root.provider.mode : ""
+      if (mode === "never") return "Signing in again replaces the current login."
+      if (mode === "cold") return "New sessions use " + candidate.name + ". Open ones keep "
+        + (activeAccount ? activeAccount.name : "the current account") + "."
+      return "Open sessions use " + candidate.name + " on their next message."
+    }
     if (roomier) return roomier.name + " has " + Math.round((1 - accountWeekly(roomier)) * 100) + "% of its week free."
     return accounts.length > 1 ? "Open sessions follow a switch on their next message." : "One account. Add another in manage."
   }
@@ -413,10 +444,14 @@ Panel {
     return free
   }
 
-  function accountColour(a) {
+  // list defaults to the selected provider's own accounts; a chip drawn for
+  // another provider (the payers strip) passes that provider's list instead,
+  // so the fallback-by-index colour never borrows another provider's account.
+  function accountColour(a, list) {
     if (a && String(a.colour || "") !== "") return a.colour
+    var accts = list || accounts
     var index = 0
-    for (var i = 0; i < accounts.length; i++) if (accounts[i] === a) index = i
+    for (var i = 0; i < accts.length; i++) if (accts[i] === a) index = i
     return palette[index % palette.length]
   }
 
@@ -437,20 +472,15 @@ Panel {
     return seconds < 120 ? "just now" : Budget.durationText(seconds * 1000) + " ago"
   }
 
-  Process {
-    id: accountsProcess
-    command: [root.accountTool, "list", "--json"]
-    stdout: StdioCollector {
-      waitForEnd: true
-      onStreamFinished: {
-        try { root.accounts = JSON.parse(text) } catch (e) { root.accounts = [] }
-      }
-    }
+  // Open sessions a switch would move: how many, and what to call them. Read
+  // straight off swapkin's listing instead of a pgrep of our own.
+  function sessionsText(p) {
+    if (!p) return ""
+    var n = Number(p.sessions || 0)
+    if (n <= 0) return ""
+    var label = p.providerId === "claude" ? "Claude Code" : p.providerName
+    return n + " " + label + (n === 1 ? " session open" : " sessions open")
   }
-
-  // How many Claude Code sessions a switch would move. They pick the new login
-  // up on their next request, so this is "who is affected", not "who must restart".
-  property int openSessions: 0
 
   // Today's tokens priced at API rates. An estimate, from prices.json.
   property real todayCost: -1
@@ -470,15 +500,6 @@ Panel {
   }
 
   Process {
-    id: sessionCountProcess
-    command: ["bash", "-c", "pgrep -x claude | wc -l"]
-    stdout: StdioCollector {
-      waitForEnd: true
-      onStreamFinished: root.openSessions = parseInt(text) || 0
-    }
-  }
-
-  Process {
     id: accountActionProcess
     onExited: function(exitCode) {
       root.reloadAccounts()
@@ -489,14 +510,13 @@ Panel {
   Process {
     id: probeProcess
     command: [root.accountTool, "usage"]
-    // Fresh figures land on the next listing.
+    // Fresh figures land on the next providers listing.
     onExited: root.reloadAccounts(false)
   }
 
   function reloadAccounts(probe) {
-    if (!accountsProcess.running) accountsProcess.running = true
+    usage.reloadSwapkin()
     if (probe !== false && !probeProcess.running) probeProcess.running = true
-    if (!sessionCountProcess.running) sessionCountProcess.running = true
     if (!costProcess.running) costProcess.running = true
   }
 
@@ -515,8 +535,8 @@ Panel {
   }
 
   function runAccountAction(args) {
-    if (accountActionProcess.running) return
-    accountActionProcess.command = [accountTool].concat(args)
+    if (accountActionProcess.running || !root.provider) return
+    accountActionProcess.command = [accountTool, "-p", root.provider.providerId].concat(args)
     accountActionProcess.running = true
   }
 
@@ -524,10 +544,12 @@ Panel {
   function recolourAccount(name, colour) { runAccountAction(["colour", name, colour]) }
   function forgetAccount(name) { runAccountAction(["remove", name]) }
 
-  // Signing in needs a terminal: the tool opens Claude Code in a throwaway
-  // config dir and imports the login once you are done.
+  // Signing in needs a terminal: the tool opens the provider's own login flow
+  // in a throwaway home and imports it once you are done.
   function addAccount() {
-    if (root.bar) root.bar.run("omarchy-launch-floating-terminal-with-presentation " + accountTool + " add")
+    if (!root.provider) return
+    if (root.bar) root.bar.run("omarchy-launch-floating-terminal-with-presentation "
+      + accountTool + " -p " + root.provider.providerId + " add")
     root.close()
   }
 
@@ -837,7 +859,7 @@ Panel {
                     font.bold: true
                   }
 
-                  ModePill { visible: root.hasAccounts }
+                  ModePill { visible: root.hasAccounts; label: root.provider ? root.provider.modeLabel : "" }
                 }
 
                 Button {
@@ -856,11 +878,11 @@ Panel {
               }
 
               Text {
-                visible: root.hasAccounts && root.openSessions > 0
+                visible: root.hasAccounts && root.provider && root.provider.sessions > 0
                 width: parent.width
                 wrapMode: Text.WordWrap
                 textFormat: Text.PlainText
-                text: root.openSessions === 1 ? "1 Claude Code session open" : root.openSessions + " Claude Code sessions open"
+                text: root.sessionsText(root.provider)
                 color: root.dim
                 font.family: root.fontFamily
                 font.pixelSize: Style.font.caption
@@ -985,7 +1007,83 @@ Panel {
                   textFormat: Text.PlainText
                   width: parent.width
                   wrapMode: Text.WordWrap
-                  text: "Signing in happens in a throwaway folder. Click a dot to recolour an account."
+                  text: (root.provider ? root.provider.addHint : "") + " Click a dot to recolour an account."
+                  color: root.dim
+                  font.family: root.fontFamily
+                  font.pixelSize: Style.font.caption
+                }
+
+                // ---- How this provider switches ----
+                PanelSeparator { foreground: root.foreground }
+
+                PanelSectionHeader {
+                  width: parent.width
+                  text: "HOW THIS PROVIDER SWITCHES"
+                  foreground: root.foreground
+                  fontFamily: root.fontFamily
+                }
+
+                Item {
+                  width: parent.width
+                  implicitHeight: Math.max(storeLabel.implicitHeight, storeValue.implicitHeight)
+
+                  Text {
+                    id: storeLabel
+                    text: "Login lives in"
+                    color: root.dim
+                    font.family: root.fontFamily
+                    font.pixelSize: Style.font.caption
+                    anchors.left: parent.left
+                    anchors.verticalCenter: parent.verticalCenter
+                  }
+
+                  Text {
+                    id: storeValue
+                    textFormat: Text.PlainText
+                    text: root.provider ? root.provider.store : ""
+                    color: root.foreground
+                    font.family: root.fontFamily
+                    font.pixelSize: Style.font.caption
+                    horizontalAlignment: Text.AlignRight
+                    anchors.left: storeLabel.right
+                    anchors.leftMargin: Style.space(10)
+                    anchors.right: parent.right
+                    anchors.verticalCenter: parent.verticalCenter
+                    elide: Text.ElideMiddle
+                  }
+                }
+
+                Item {
+                  width: parent.width
+                  implicitHeight: Math.max(switchLabel.implicitHeight, switchValue.implicitHeight)
+
+                  Text {
+                    id: switchLabel
+                    text: "A switch"
+                    color: root.dim
+                    font.family: root.fontFamily
+                    font.pixelSize: Style.font.caption
+                    anchors.left: parent.left
+                    anchors.verticalCenter: parent.verticalCenter
+                  }
+
+                  Text {
+                    id: switchValue
+                    textFormat: Text.PlainText
+                    text: root.provider ? root.provider.modeLabel : ""
+                    color: root.foreground
+                    font.family: root.fontFamily
+                    font.pixelSize: Style.font.caption
+                    anchors.right: parent.right
+                    anchors.verticalCenter: parent.verticalCenter
+                  }
+                }
+
+                Text {
+                  textFormat: Text.PlainText
+                  width: parent.width
+                  wrapMode: Text.WordWrap
+                  text: "Why " + (root.provider ? root.provider.how : "")
                   color: root.dim
                   font.family: root.fontFamily
                   font.pixelSize: Style.font.caption
@@ -1028,7 +1126,8 @@ Panel {
                   visible: !!root.candidate && !root.candidate.active
                   anchors.left: parent.left
                   anchors.verticalCenter: parent.verticalCenter
-                  text: "Switch to " + (root.candidate ? root.candidate.name : "") + "  (a)"
+                  text: (root.provider && root.provider.mode === "never" ? "Sign in as " : "Switch to ")
+                    + (root.candidate ? root.candidate.name : "") + "  (a)"
                   bordered: true
                   selected: true
                   foreground: root.foreground
@@ -1210,6 +1309,63 @@ Panel {
                 }
               }
 
+              // ---- Counts: tools with no ceiling report a count, never a percent ----
+              PanelSeparator {
+                visible: countsSection.visible
+                foreground: root.foreground
+              }
+
+              Column {
+                id: countsSection
+                readonly property var counts: root.candidate && Array.isArray(root.candidate.counts) ? root.candidate.counts : []
+                visible: counts.length > 0 && !root.managing
+                width: parent.width
+                spacing: Style.space(8)
+
+                PanelSectionHeader {
+                  text: "USAGE"
+                  foreground: root.foreground
+                  fontFamily: root.fontFamily
+                }
+
+                Repeater {
+                  model: countsSection.counts
+
+                  Item {
+                    required property var modelData
+                    width: countsSection.width
+                    implicitHeight: Math.max(countLabel.implicitHeight, countValue.implicitHeight)
+
+                    Text {
+                      id: countLabel
+                      textFormat: Text.PlainText
+                      text: String(modelData.label || "")
+                      color: root.foreground
+                      font.family: root.fontFamily
+                      font.pixelSize: Style.font.body
+                      anchors.left: parent.left
+                      anchors.verticalCenter: parent.verticalCenter
+                    }
+
+                    Text {
+                      id: countValue
+                      textFormat: Text.PlainText
+                      text: String(modelData.value) + (modelData.unit ? " " + modelData.unit : "")
+                      color: root.foreground
+                      font.family: root.fontFamily
+                      font.pixelSize: Style.font.caption
+                      anchors.right: parent.right
+                      anchors.verticalCenter: parent.verticalCenter
+                    }
+                  }
+                }
+
+                CaptionText {
+                  visible: root.limits.length === 0
+                  text: "No ceiling reported, so no pace."
+                }
+              }
+
               // ---- Tokens by day ----
               PanelSeparator {
                 visible: usageSection.visible && !root.managing
@@ -1277,9 +1433,11 @@ Panel {
                 }
               }
 
-              // Today, in the other unit people think in.
+              // Today, in the other unit people think in. Claude only: the
+              // estimate is priced from prices.json, which only knows Claude.
               Text {
                 visible: !root.managing && root.hasAccounts && root.todayCost >= 0
+                  && root.provider && root.provider.providerId === "claude"
                 width: parent.width
                 textFormat: Text.PlainText
                 text: "Today ≈ $" + root.todayCost.toFixed(2) + " at API prices · estimated from prices.json"
@@ -1377,6 +1535,8 @@ Panel {
 
   // "next message" and its kin: how a switch reaches a session that is already open.
   component ModePill: Rectangle {
+    property string label: "next message"
+
     implicitWidth: pillText.implicitWidth + Style.space(12)
     implicitHeight: pillText.implicitHeight + Style.space(2)
     radius: height / 2
@@ -1388,7 +1548,7 @@ Panel {
       id: pillText
       anchors.centerIn: parent
       textFormat: Text.PlainText
-      text: "next message"
+      text: parent.label
       color: root.dim
       font.family: root.fontFamily
       font.pixelSize: Style.font.caption
@@ -1402,9 +1562,13 @@ Panel {
     property var provider: null
     property bool selected: false
 
-    readonly property var windows: root.providerWindows(provider, root.activeAccount)
+    // Its own active account, never root.activeAccount: that one belongs to
+    // whichever provider is selected, and a row for another provider must
+    // never borrow it.
+    readonly property var rowActive: root.activeAccountFor(provider)
+    readonly property var windows: root.providerWindows(provider, rowActive)
     readonly property var tight: root.tightest(windows)
-    readonly property bool isClaude: !!provider && provider.providerId === "claude" && root.hasAccounts
+    readonly property bool hasAccounts: !!provider && (provider.accounts || []).length > 0
 
     implicitHeight: rowBody.implicitHeight + Style.space(16)
     hoverEnabled: true
@@ -1448,8 +1612,8 @@ Panel {
         textFormat: Text.PlainText
         width: parent.width
         elide: Text.ElideRight
-        text: providerRow.isClaude && root.activeAccount
-          ? root.activeAccount.name + " · " + root.accountPlan(root.activeAccount)
+        text: providerRow.rowActive
+          ? providerRow.rowActive.name + " · " + root.accountPlan(providerRow.rowActive)
           : root.heroMeta(providerRow.provider)
         color: root.dim
         font.family: root.fontFamily
@@ -1480,7 +1644,10 @@ Panel {
         }
       }
 
-      ModePill { visible: providerRow.isClaude }
+      ModePill {
+        visible: providerRow.hasAccounts
+        label: providerRow.provider ? providerRow.provider.modeLabel : ""
+      }
     }
   }
 
