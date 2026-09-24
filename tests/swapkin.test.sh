@@ -143,6 +143,41 @@ assert_eq "old-format: 300min window labelled '5h window'" "5h window" "$oldfmt_
 assert_eq "old-format: percent converted from used_percent" "0.09" "$oldfmt_pct"
 assert_contains "old-format: resets_in_seconds turned into ISO" "$oldfmt_resets" "T"
 
+# ================================================ 4. copilot probe + no token in argv ==
+echo "4. copilot probe parses a fixture and never puts the token in argv"
+S=$(sandbox)
+export HOME="$S/home" SWAPKIN_DIR="$S/data" XDG_CONFIG_HOME="$S/config" \
+       XDG_STATE_HOME="$S/state" XDG_CACHE_HOME="$S/cache" PATH="$STUBS:$PATH"
+GH_ARGV_LOG="$S/gh-argv.log"; : > "$GH_ARGV_LOG"
+GH_SECRET_TOKEN="ghs_SENTINEL_NEVER_IN_ARGV_0000000000"
+mk_stub gh "
+ARGV_LOG=\"$GH_ARGV_LOG\"
+echo \"\$@\" >> \"\$ARGV_LOG\"
+case \"\$1\" in
+  auth)
+    case \"\$2\" in
+      status) cat '$FIXTURES/gh-auth-status.json' ;;
+      token) echo '$GH_SECRET_TOKEN' ;;
+      switch) exit 0 ;;
+    esac ;;
+  api) cat '$FIXTURES/copilot-user.json' ;;
+esac
+"
+mkdir -p "$SWAPKIN_DIR/providers/copilot/work"
+jq -n '{user:"octo-work"}' > "$SWAPKIN_DIR/providers/copilot/work/copilot.json"
+jq -n '{colour:"#7fa7d9"}' > "$SWAPKIN_DIR/providers/copilot/work/meta.json"
+echo work > "$SWAPKIN_DIR/providers/copilot/active"
+
+sk "$SWAPKIN" -p copilot usage >/dev/null
+plan=$(jq -r .tierLabel "$SWAPKIN_DIR/providers/copilot/work/usage.json" 2>/dev/null)
+premium_pct=$(jq -r '.limits[0].percent' "$SWAPKIN_DIR/providers/copilot/work/usage.json" 2>/dev/null)
+chat_count=$(jq -r '.counts[] | select(.label=="Chat") | .value' "$SWAPKIN_DIR/providers/copilot/work/usage.json" 2>/dev/null)
+assert_eq "plan mapped from access_type_sku (individual -> Pro)" "Pro" "$plan"
+assert_eq "premium requests percent = used/entitlement" "0.62" "$premium_pct"
+assert_eq "unlimited quota becomes a count, not a percent" "unlimited" "$chat_count"
+argv_content=$(cat "$GH_ARGV_LOG")
+assert_not_contains "gh's argv log never contains the token" "$argv_content" "$GH_SECRET_TOKEN"
+
 # ======================================================= 9. providers --json shape ==
 echo "9. providers --json output validates against the documented shape"
 S=$(sandbox)
@@ -263,6 +298,33 @@ echo work > "$SWAPKIN_DIR/providers/codex/active"
 sk "$SWAPKIN" run codex -- -p myprofile exec hi >/dev/null
 argv=$(cat "$CODEX_ARGV_LOG" 2>/dev/null)
 assert_eq "codex's own -p reaches it unchanged" "-p myprofile exec hi" "$argv"
+
+# ============================================ 16. M9: copilot active from gh ==
+echo "16. copilot's active account follows gh's real login, and use always calls gh auth switch"
+S=$(sandbox)
+export HOME="$S/home" SWAPKIN_DIR="$S/data" XDG_CONFIG_HOME="$S/config" \
+       XDG_STATE_HOME="$S/state" XDG_CACHE_HOME="$S/cache" PATH="$STUBS:$PATH"
+GH_SWITCH_LOG="$S/gh-switch.log"; : > "$GH_SWITCH_LOG"
+mk_stub gh "
+case \"\$1 \$2\" in
+  'auth status') cat '$FIXTURES/gh-auth-status.json' ;;
+  'auth switch') echo \"\$@\" >> \"$GH_SWITCH_LOG\"; exit 0 ;;
+esac
+"
+mkdir -p "$SWAPKIN_DIR/providers/copilot/work" "$SWAPKIN_DIR/providers/copilot/other"
+jq -n '{user:"octo-work"}' > "$SWAPKIN_DIR/providers/copilot/work/copilot.json"
+jq -n '{colour:"#7fa7d9"}' > "$SWAPKIN_DIR/providers/copilot/work/meta.json"
+jq -n '{user:"octo-other"}' > "$SWAPKIN_DIR/providers/copilot/other/copilot.json"
+jq -n '{colour:"#d97757"}' > "$SWAPKIN_DIR/providers/copilot/other/meta.json"
+# The stored pointer says 'other', but gh (the fixture) says octo-work is active.
+echo other > "$SWAPKIN_DIR/providers/copilot/active"
+
+out=$(sk "$SWAPKIN" -p copilot status)
+assert_contains "status reads gh's real active login, not the stale stored pointer" "$out" "work"
+
+out2=$(sk "$SWAPKIN" -p copilot use work)
+switch_log=$(cat "$GH_SWITCH_LOG")
+assert_contains "use still calls gh auth switch even though gh already agrees" "$switch_log" "octo-work"
 
 # ============================================ 17. M5: cold remove vs a live process ==
 echo "17. codex remove refuses while a running process holds that CODEX_HOME open"
