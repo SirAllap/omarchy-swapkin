@@ -1,12 +1,15 @@
 # Swapkin
 
-Switch between several Claude Code accounts from the Omarchy bar, without
-re-logging in and without losing your sessions.
+Switch between several accounts, for several tools, from the Omarchy bar,
+without re-logging in and without losing your sessions.
+
+Swapkin now covers Claude Code, Codex CLI, and Copilot CLI (via `gh`). Each
+provider switches its own way — some pick up the new account on their very
+next message, others only for a session you start after the switch — see
+[How switching works](#how-switching-works) below.
 
 One shared config directory stays where it is. A switch swaps the login inside
-it, so settings, sessions, skills, hooks and MCP logins are untouched, and the
-Claude Code windows you already have open follow the new account on their next
-message.
+it, so settings, sessions, skills, hooks and MCP logins are untouched.
 
 ![The Swapkin panel in the Omarchy bar](docs/panel.png)
 
@@ -32,7 +35,9 @@ message.
 ## Requirements
 
 - Omarchy with the shell plugin system (`omarchy plugin --help` works)
-- `claude` (Claude Code), `jq`, and `notify-send` for the warnings
+- `jq` and `notify-send` for the warnings
+- Whichever tools you actually switch: `claude` (Claude Code), `codex`
+  (Codex CLI), `gh` with the Copilot CLI extension, or your own
 
 ## Install
 
@@ -65,22 +70,51 @@ swapkin list
 
 ## How switching works
 
-Claude Code keeps its login in `.credentials.json` and the account profile in
-`.claude.json`. Swapkin swaps only those two things:
+Pick a provider with `swapkin -p <id> ...` (`claude` if you leave it out).
+Each one switches a different way:
 
-| Swapped with the account | Left alone |
-| --- | --- |
-| `claudeAiOauth` in `.credentials.json` | `mcpOAuth` (Slack, Figma, …) |
-| The account keys in `.claude.json`: profile, user id, model access, org defaults, extra-usage state | Projects, history, onboarding, machine ids, settings, skills, hooks |
-
-Two details that matter:
-
-- **Open sessions notice.** Claude Code re-reads the credentials file when its
+- **Claude Code — next message.** Claude Code keeps its login in
+  `.credentials.json` and the account profile in `.claude.json`. Swapkin swaps
+  only the account's own keys there and re-reads the file when its
   modification time changes, so a running session picks the new account up on
   its next request. Connectors may keep the old account until that session is
   restarted.
-- **Refresh tokens rotate.** Every switch writes the live login back to its own
-  profile first, so a stored login is never the stale half of a rotation.
+
+  | Swapped with the account | Left alone |
+  | --- | --- |
+  | `claudeAiOauth` in `.credentials.json` | `mcpOAuth` (Slack, Figma, …) |
+  | The account keys in `.claude.json`: profile, user id, model access, org defaults, extra-usage state | Projects, history, onboarding, machine ids, settings, skills, hooks |
+
+- **Codex CLI — new sessions.** Codex reads its login from `$CODEX_HOME`, so
+  `swapkin use` only moves a pointer to which account's home a *new* `codex`
+  process gets. A Codex session already running keeps whatever it started
+  with. See [below](#codex-and-other-new-session-tools) for how to point a
+  shell or a launch at the current account.
+- **Copilot CLI — new sessions.** Copilot has no login file of its own; it
+  rides on `gh`'s account. Switching runs `gh auth switch`, so new Copilot CLI
+  sessions (and anything else that asks `gh` who's signed in, including `git
+  push`) use the new account, but a Copilot CLI session already running keeps
+  its token. A login made with `copilot login` directly, instead of through
+  `gh`, isn't switched by Swapkin.
+
+Every provider writes the outgoing account's live login back to its own saved
+copy *before* swapping in, so a stored login is never the stale half of a
+refresh-token rotation.
+
+## Codex and other new-session tools
+
+`swapkin use` alone won't change a Codex (or Copilot CLI) session that's
+already open — it only changes what the *next* one gets. Two ways to make
+that automatic:
+
+```bash
+eval "$(swapkin env)"      # add to your shell rc; sets CODEX_HOME etc. per shell
+swapkin run codex           # or launch straight into the active account
+```
+
+`swapkin env [id]` prints the active account's environment as `export`
+lines (no id switches every provider it knows); `swapkin run <id> [-- args]`
+runs that provider's own CLI with the same environment already set.
 
 ## Your own tools
 
@@ -192,8 +226,8 @@ cut off.
 
 ## Limitations
 
-- Claude Code only. The name is deliberately generic: another CLI with the same
-  shape of login could be added later.
+- Claude Code, Codex CLI and Copilot CLI ship built in; anything else with the
+  same shape of login is a `providers.json` entry away.
 - Token history is machine-wide, not per account — the session files do not
   record which account paid for them. Limits *are* per account.
 - An idle account's figures are only as fresh as its login: when its token
