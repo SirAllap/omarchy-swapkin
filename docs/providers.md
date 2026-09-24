@@ -67,6 +67,59 @@ $SWAPKIN_DIR/providers/<id>/active
 
 `$SWAPKIN_DIR` defaults to `${XDG_DATA_HOME:-~/.local/share}/swapkin`.
 
+## Your own provider: `~/.config/swapkin/providers.json`
+
+```json
+{
+  "providers": [
+    { "id": "mytool", "name": "My Tool", "command": "mytool", "mode": "hot",
+      "loginFiles": ["~/.mytool/auth.json"],
+      "usageCommand": "mytool usage --json" },
+
+    { "id": "other", "name": "Other", "command": "other", "mode": "cold",
+      "homeEnv": "OTHER_HOME", "defaultHome": "~/.other",
+      "loginCommand": "other login",
+      "usageCommand": "other usage --json" }
+  ]
+}
+```
+
+- `id` follows the same rules as an account name (`a-z0-9_-`) and can't reuse
+  a built-in id (`claude`, `codex`, `copilot`).
+- Every path is expanded from `~` and must resolve under `$HOME` — nothing
+  outside it, nothing that could point at the repo or the system.
+- The file is **ignored, with a warning on stderr**, unless it is owned by
+  you and not writable by your group or anyone else. It runs commands
+  (`usageCommand`, `loginCommand`), so a config an attacker could edit is a
+  config swapkin will not read.
+- **hot**: `loginFiles` are the files that hold the login. The first `add`
+  captures whatever is live now (a copy under `<profile>/files/<index>`).
+  Every later `add` does, in this order: save the currently-active account's
+  live files back into its own profile *first* — before printing anything —
+  then ask you to sign in with the tool, then poll (up to 900s) until the
+  live files actually change, then capture the changed files as the new
+  account. `add` never saves the live login back a second time after you've
+  signed in, so a login you make while `add` is waiting can never land under
+  the old account's name. `use` first checks that every saved copy in the
+  target account's profile, and every corresponding live file, exist — it
+  refuses and changes nothing if either is missing — then saves the
+  outgoing account back and swaps in the target account's copies with an
+  atomic replace (temp file + `mv`, same file mode).
+- **cold**: `homeEnv` is the environment variable your tool reads for its
+  home directory; `defaultHome` is where the existing login already lives.
+  The first account references `defaultHome` directly — never copied, since
+  a copied refresh token would rotate under the original. Later accounts get
+  their own `<profile>/home`; `loginCommand` runs with `homeEnv` pointed at
+  it so you can sign in (`timeout --foreground 300`, so an interactive
+  prompt can still read the terminal; `add` then checks the home actually
+  gained something before saying "Saved"). `swapkin use` only flips which account new sessions
+  get; `swapkin env <id>` / `swapkin run <id>` are how a shell or a one-off
+  command actually picks it up.
+- **usageCommand**: run with `SWAPKIN_PROFILE=<profile dir>` (and `homeEnv`
+  for cold providers) and a 20s timeout. It must print the `usage.json`
+  shape below on stdout. Invalid JSON leaves the last good `usage.json` in
+  place.
+
 ## `usage.json` (what `p_probe` writes per account)
 
 ```json

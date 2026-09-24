@@ -178,6 +178,70 @@ assert_eq "unlimited quota becomes a count, not a percent" "unlimited" "$chat_co
 argv_content=$(cat "$GH_ARGV_LOG")
 assert_not_contains "gh's argv log never contains the token" "$argv_content" "$GH_SECRET_TOKEN"
 
+# ==================================================== 5. custom hot save-then-swap ==
+echo "5. custom hot saves back then swaps"
+S=$(sandbox)
+export HOME="$S/home" SWAPKIN_DIR="$S/data" XDG_CONFIG_HOME="$S/config" \
+       XDG_STATE_HOME="$S/state" XDG_CACHE_HOME="$S/cache" PATH="$STUBS:$PATH"
+mkdir -p "$XDG_CONFIG_HOME/swapkin" "$HOME/.acme"
+cat > "$XDG_CONFIG_HOME/swapkin/providers.json" <<JSON
+{"providers":[{"id":"acme","name":"Acme CLI","command":"acme","mode":"hot","loginFiles":["~/.acme/session.json"]}]}
+JSON
+chmod 600 "$XDG_CONFIG_HOME/swapkin/providers.json"
+echo '{"session":"work-session-live"}' > "$HOME/.acme/session.json"
+mkdir -p "$SWAPKIN_DIR/providers/acme/work/files" "$SWAPKIN_DIR/providers/acme/side-project/files"
+echo '{"session":"work-session-live"}' > "$SWAPKIN_DIR/providers/acme/work/files/0"
+jq -n '{colour:"#7fa7d9"}' > "$SWAPKIN_DIR/providers/acme/work/meta.json"
+echo '{"mode":"hot"}' > "$SWAPKIN_DIR/providers/acme/work/custom.json"
+echo '{"session":"side-project-session"}' > "$SWAPKIN_DIR/providers/acme/side-project/files/0"
+jq -n '{colour:"#d97757"}' > "$SWAPKIN_DIR/providers/acme/side-project/meta.json"
+echo '{"mode":"hot"}' > "$SWAPKIN_DIR/providers/acme/side-project/custom.json"
+echo work > "$SWAPKIN_DIR/providers/acme/active"
+echo '{"session":"changed-since-add"}' > "$HOME/.acme/session.json"
+
+out=$(sk "$SWAPKIN" -p acme use side-project)
+assert_contains "custom hot use reports the new active account" "$out" "Active: side-project"
+saved=$(cat "$SWAPKIN_DIR/providers/acme/work/files/0")
+assert_eq "outgoing account's live file saved back before swap" '{"session":"changed-since-add"}' "$saved"
+live=$(cat "$HOME/.acme/session.json")
+assert_eq "live file replaced with incoming account's saved copy" '{"session":"side-project-session"}' "$live"
+
+# =========================================================== 6. custom cold env ==
+echo "6. custom cold env"
+S=$(sandbox)
+export HOME="$S/home" SWAPKIN_DIR="$S/data" XDG_CONFIG_HOME="$S/config" \
+       XDG_STATE_HOME="$S/state" XDG_CACHE_HOME="$S/cache" PATH="$STUBS:$PATH"
+mkdir -p "$XDG_CONFIG_HOME/swapkin"
+cat > "$XDG_CONFIG_HOME/swapkin/providers.json" <<JSON
+{"providers":[{"id":"othertool","name":"Other Tool","command":"othertool","mode":"cold","homeEnv":"OTHER_HOME","defaultHome":"~/.other"}]}
+JSON
+chmod 600 "$XDG_CONFIG_HOME/swapkin/providers.json"
+mkdir -p "$SWAPKIN_DIR/providers/othertool/side-project"
+jq -n --arg h "$S/other-home" '{mode:"cold", home:$h}' > "$SWAPKIN_DIR/providers/othertool/side-project/custom.json"
+jq -n '{colour:"#8fb572"}' > "$SWAPKIN_DIR/providers/othertool/side-project/meta.json"
+echo side-project > "$SWAPKIN_DIR/providers/othertool/active"
+
+out=$(sk "$SWAPKIN" env othertool)
+assert_contains "env prints export OTHER_HOME=..." "$out" "export OTHER_HOME="
+assert_contains "env points at the account's own home" "$out" "$S/other-home"
+
+# =========================================== 7. unsafe custom config is ignored ==
+echo "7. unsafe custom config file is ignored with a stderr warning"
+S=$(sandbox)
+export HOME="$S/home" SWAPKIN_DIR="$S/data" XDG_CONFIG_HOME="$S/config" \
+       XDG_STATE_HOME="$S/state" XDG_CACHE_HOME="$S/cache" PATH="$STUBS:$PATH"
+mkdir -p "$XDG_CONFIG_HOME/swapkin"
+cat > "$XDG_CONFIG_HOME/swapkin/providers.json" <<JSON
+{"providers":[{"id":"unsafe","name":"Unsafe","command":"unsafe","mode":"hot","loginFiles":[]}]}
+JSON
+chmod 666 "$XDG_CONFIG_HOME/swapkin/providers.json"
+
+out=$("$SWAPKIN" providers --json 2>"$S/stderr.log")
+echo "$out" >> "$ALL_OUTPUT_LOG"
+cat "$S/stderr.log" >> "$ALL_OUTPUT_LOG"
+assert_contains "a warning is printed to stderr" "$(cat "$S/stderr.log")" "ignoring"
+assert_not_contains "the unsafe provider is not in the output" "$out" '"id":"unsafe"'
+
 # ======================================================= 9. providers --json shape ==
 echo "9. providers --json output validates against the documented shape"
 S=$(sandbox)
@@ -205,6 +269,43 @@ shape_ok=$(jq -e '
 assert_eq "providers --json matches the documented shape" "yes" "$shape_ok"
 assert_contains "the claude provider with its saved account is present" "$out" '"id":"claude"'
 
+# ============================================= 10. H1: custom hot add reorders ==
+echo "10. custom hot add saves the active account back FIRST, then waits for a new sign-in"
+S=$(sandbox)
+export HOME="$S/home" SWAPKIN_DIR="$S/data" XDG_CONFIG_HOME="$S/config" \
+       XDG_STATE_HOME="$S/state" XDG_CACHE_HOME="$S/cache" PATH="$STUBS:$PATH"
+mkdir -p "$XDG_CONFIG_HOME/swapkin" "$HOME/.acme"
+cat > "$XDG_CONFIG_HOME/swapkin/providers.json" <<JSON
+{"providers":[{"id":"acme","name":"Acme CLI","command":"acme","mode":"hot","loginFiles":["~/.acme/session.json"]}]}
+JSON
+chmod 600 "$XDG_CONFIG_HOME/swapkin/providers.json"
+mkdir -p "$SWAPKIN_DIR/providers/acme/work/files"
+echo '{"session":"work-session-STALE"}' > "$SWAPKIN_DIR/providers/acme/work/files/0"
+jq -n '{colour:"#7fa7d9"}' > "$SWAPKIN_DIR/providers/acme/work/meta.json"
+echo '{"mode":"hot"}' > "$SWAPKIN_DIR/providers/acme/work/custom.json"
+echo work > "$SWAPKIN_DIR/providers/acme/active"
+# The live file when `add` starts: work's real, current login (H1's bug: the
+# old code copied THIS into work's profile only after account B had already
+# signed in and overwritten it, losing work's login for good).
+echo '{"session":"work-session-LIVE"}' > "$HOME/.acme/session.json"
+
+"$SWAPKIN" -p acme add second >"$S/add-out.log" 2>&1 &
+ADD_PID=$!
+sleep 2
+# Simulate signing in as the second account: the live file changes.
+echo '{"session":"second-session-live"}' > "$HOME/.acme/session.json"
+wait "$ADD_PID"; add_rc=$?
+add_out=$(cat "$S/add-out.log")
+echo "$add_out" >> "$ALL_OUTPUT_LOG"
+assert_eq "add exits 0 once the sign-in is picked up" 0 "$add_rc"
+work_saved=$(cat "$SWAPKIN_DIR/providers/acme/work/files/0")
+assert_eq "work's profile holds its OWN live login, saved back before asking to sign in" \
+  '{"session":"work-session-LIVE"}' "$work_saved"
+second_saved=$(cat "$SWAPKIN_DIR/providers/acme/second/files/0")
+assert_eq "second's profile holds the NEW sign-in, not work's" \
+  '{"session":"second-session-live"}' "$second_saved"
+assert_eq "second becomes active" "second" "$(cat "$SWAPKIN_DIR/providers/acme/active")"
+
 # ==================================== 11. H2: remove providers / path traversal ==
 echo "11. remove providers is rejected; path traversal in remove is rejected"
 S=$(sandbox)
@@ -225,6 +326,37 @@ out=$("$SWAPKIN" -p codex remove '../x' 2>&1); rc=$?
 echo "$out" >> "$ALL_OUTPUT_LOG"
 assert_true [ "$rc" -ne 0 ]
 assert_contains "path traversal in remove is rejected" "$out" "account names use"
+
+# ========================================= 12. M1: custom hot use, partial swap ==
+echo "12. custom hot use refuses (and changes nothing) when a saved copy or a live file is missing"
+S=$(sandbox)
+export HOME="$S/home" SWAPKIN_DIR="$S/data" XDG_CONFIG_HOME="$S/config" \
+       XDG_STATE_HOME="$S/state" XDG_CACHE_HOME="$S/cache" PATH="$STUBS:$PATH"
+mkdir -p "$XDG_CONFIG_HOME/swapkin" "$HOME/.acme2"
+cat > "$XDG_CONFIG_HOME/swapkin/providers.json" <<JSON
+{"providers":[{"id":"acme2","name":"Acme2","command":"acme2","mode":"hot","loginFiles":["~/.acme2/a.json","~/.acme2/b.json"]}]}
+JSON
+chmod 600 "$XDG_CONFIG_HOME/swapkin/providers.json"
+echo '{"f":"a-live"}' > "$HOME/.acme2/a.json"
+echo '{"f":"b-live"}' > "$HOME/.acme2/b.json"
+mkdir -p "$SWAPKIN_DIR/providers/acme2/work/files" "$SWAPKIN_DIR/providers/acme2/broken/files"
+echo '{"f":"a-saved-work"}' > "$SWAPKIN_DIR/providers/acme2/work/files/0"
+echo '{"f":"b-saved-work"}' > "$SWAPKIN_DIR/providers/acme2/work/files/1"
+jq -n '{colour:"#7fa7d9"}' > "$SWAPKIN_DIR/providers/acme2/work/meta.json"
+echo '{"mode":"hot"}' > "$SWAPKIN_DIR/providers/acme2/work/custom.json"
+# 'broken' is missing its saved copy of file index 1 (b.json).
+echo '{"f":"a-saved-broken"}' > "$SWAPKIN_DIR/providers/acme2/broken/files/0"
+jq -n '{colour:"#d97757"}' > "$SWAPKIN_DIR/providers/acme2/broken/meta.json"
+echo '{"mode":"hot"}' > "$SWAPKIN_DIR/providers/acme2/broken/custom.json"
+echo work > "$SWAPKIN_DIR/providers/acme2/active"
+
+out=$("$SWAPKIN" -p acme2 use broken 2>&1); rc=$?
+echo "$out" >> "$ALL_OUTPUT_LOG"
+assert_true [ "$rc" -ne 0 ]
+assert_contains "use refuses when a saved copy is missing" "$out" "no saved copy"
+a_live=$(cat "$HOME/.acme2/a.json")
+assert_eq "file 0 (checked first) was NOT swapped before the missing file 1 was found" '{"f":"a-live"}' "$a_live"
+assert_eq "active pointer unchanged on refusal" "work" "$(cat "$SWAPKIN_DIR/providers/acme2/active")"
 
 # ============================================ 13. M2: malformed usage.json ==
 echo "13. a non-object usage.json never breaks providers --json / list --json"

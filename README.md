@@ -82,6 +82,31 @@ Two details that matter:
 - **Refresh tokens rotate.** Every switch writes the live login back to its own
   profile first, so a stored login is never the stale half of a rotation.
 
+## Your own tools
+
+Any tool that keeps a login in a file, or a separate home directory per
+account, can be added without touching Swapkin's code. Describe it in
+`~/.config/swapkin/providers.json`:
+
+```json
+{
+  "providers": [
+    { "id": "acme-cli", "name": "Acme CLI", "command": "acme", "mode": "hot",
+      "loginFiles": ["~/.acme/session.json"] },
+
+    { "id": "widget-agent", "name": "Widget Agent", "command": "widget", "mode": "cold",
+      "homeEnv": "WIDGET_HOME", "defaultHome": "~/.widget" }
+  ]
+}
+```
+
+`acme-cli` is a **hot** example: one shared login file, swapped in place, so
+a running `acme` session sees the new account on its next message — same as
+Claude Code. `widget-agent` is a **cold** example: a separate home directory
+per account, so only a `widget` process started after `swapkin use` gets the
+new one. Full contract (safety rules, `usageCommand`, sign-in flow) in
+[`docs/providers.md`](docs/providers.md).
+
 ## Commands
 
 | Command | What it does |
