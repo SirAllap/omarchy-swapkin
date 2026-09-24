@@ -5,7 +5,7 @@
   "version": "0.1.0",
   "author": "SirAllap",
   "license": "MIT",
-  "description": "Never get blocked by Claude Code limits again — Swapkin tracks weekly pace across every account and switches between them from the Omarchy bar in one click.",
+  "description": "Never get blocked by Claude Code limits again \u2014 Swapkin tracks weekly pace across every account and switches between them from the Omarchy bar in one click.",
   "kinds": [
     "bar-widget",
     "service"
@@ -32,7 +32,11 @@
       "syncDir": "",
       "syncFileName": "",
       "syncDeviceId": "",
-      "watchIntervalMin": 5
+      "watchIntervalMin": 5,
+      "budgetSpread": "Working days",
+      "budgetDays": "Mon,Tue,Wed,Thu,Fri",
+      "budgetStartHour": 9,
+      "budgetEndHour": 19
     },
     "schema": [
       {
@@ -85,6 +89,43 @@
         "step": 1,
         "defaultValue": 5,
         "description": "How often Swapkin refreshes limits in the background, warns near the cap, and hands over when an account is spent."
+      },
+      {
+        "key": "budgetSpread",
+        "type": "enum",
+        "label": "Weekly budget spread over",
+        "options": [
+          "Working days",
+          "Every day"
+        ],
+        "defaultValue": "Working days",
+        "description": "Working days: only the days and hours below earn weekly budget. Every day: the budget grows evenly all week. With no working day picked, it behaves like Every day."
+      },
+      {
+        "key": "budgetDays",
+        "type": "string",
+        "label": "Working days",
+        "defaultValue": "Mon,Tue,Wed,Thu,Fri",
+        "description": "Comma-separated day names, for example Mon,Tue,Wed,Thu,Fri. Ranges such as Mon-Fri are not supported."
+      },
+      {
+        "key": "budgetStartHour",
+        "type": "integer",
+        "label": "Work starts (hour)",
+        "min": 0,
+        "max": 23,
+        "step": 1,
+        "defaultValue": 9
+      },
+      {
+        "key": "budgetEndHour",
+        "type": "integer",
+        "label": "Work ends (hour)",
+        "min": 1,
+        "max": 24,
+        "step": 1,
+        "defaultValue": 19,
+        "description": "If the end is not after the start, the budget behaves like Every day."
       }
     ]
   },
