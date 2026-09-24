@@ -85,6 +85,64 @@ live_now=$(jq -r .claudeAiOauth.refreshToken "$CLAUDE_CONFIG_DIR/.credentials.js
 assert_eq "live credentials now hold the incoming account's token" "$PERSONAL_TOKEN" "$live_now"
 assert_eq "active pointer updated" "personal" "$(cat "$SWAPKIN_DIR/active")"
 
+# ======================================================= 2. codex writes no auth.json ==
+echo "2. codex use writes no auth.json anywhere"
+S=$(sandbox)
+export HOME="$S/home" SWAPKIN_DIR="$S/data" XDG_CONFIG_HOME="$S/config" \
+       XDG_STATE_HOME="$S/state" XDG_CACHE_HOME="$S/cache" PATH="$STUBS:$PATH"
+unset CLAUDE_CONFIG_DIR
+mkdir -p "$S/codex-home-a" "$S/codex-home-b"
+echo '{"tokens":{"id_token":"x"}}' > "$S/codex-home-a/auth.json"
+echo '{"tokens":{"id_token":"x"}}' > "$S/codex-home-b/auth.json"
+before_a=$(md5sum "$S/codex-home-a/auth.json" | cut -d' ' -f1)
+before_b=$(md5sum "$S/codex-home-b/auth.json" | cut -d' ' -f1)
+mkdir -p "$SWAPKIN_DIR/providers/codex/work" "$SWAPKIN_DIR/providers/codex/side-project"
+jq -n --arg h "$S/codex-home-a" '{home:$h}' > "$SWAPKIN_DIR/providers/codex/work/codex.json"
+jq -n '{colour:"#7fa7d9"}' > "$SWAPKIN_DIR/providers/codex/work/meta.json"
+jq -n --arg h "$S/codex-home-b" '{home:$h}' > "$SWAPKIN_DIR/providers/codex/side-project/codex.json"
+jq -n '{colour:"#d97757"}' > "$SWAPKIN_DIR/providers/codex/side-project/meta.json"
+echo work > "$SWAPKIN_DIR/providers/codex/active"
+
+before_count=$(find "$S" -name auth.json | wc -l)
+out=$(sk "$SWAPKIN" -p codex use side-project)
+assert_contains "codex use reports the new active account" "$out" "side-project"
+after_count=$(find "$S" -name auth.json | wc -l)
+assert_eq "no new auth.json files appeared anywhere under the sandbox" "$before_count" "$after_count"
+assert_eq "codex-home-a/auth.json untouched" "$before_a" "$(md5sum "$S/codex-home-a/auth.json" | cut -d' ' -f1)"
+assert_eq "codex-home-b/auth.json untouched" "$before_b" "$(md5sum "$S/codex-home-b/auth.json" | cut -d' ' -f1)"
+assert_eq "active pointer switched" "side-project" "$(cat "$SWAPKIN_DIR/providers/codex/active")"
+
+# ==================================================== 3. codex probe: new + old fields ==
+echo "3. codex probe parses a rollout fixture (new and old reset fields)"
+S=$(sandbox)
+export HOME="$S/home" SWAPKIN_DIR="$S/data" XDG_CONFIG_HOME="$S/config" \
+       XDG_STATE_HOME="$S/state" XDG_CACHE_HOME="$S/cache" PATH="$STUBS:$PATH"
+mkdir -p "$S/home-new/sessions" "$S/home-old/sessions"
+cp "$FIXTURES/rollout-new.jsonl" "$S/home-new/sessions/rollout-001.jsonl"
+cp "$FIXTURES/rollout-old.jsonl" "$S/home-old/sessions/rollout-001.jsonl"
+mkdir -p "$SWAPKIN_DIR/providers/codex/newfmt" "$SWAPKIN_DIR/providers/codex/oldfmt"
+jq -n --arg h "$S/home-new" '{home:$h}' > "$SWAPKIN_DIR/providers/codex/newfmt/codex.json"
+jq -n '{colour:"#7fa7d9"}' > "$SWAPKIN_DIR/providers/codex/newfmt/meta.json"
+jq -n --arg h "$S/home-old" '{home:$h}' > "$SWAPKIN_DIR/providers/codex/oldfmt/codex.json"
+jq -n '{colour:"#d97757"}' > "$SWAPKIN_DIR/providers/codex/oldfmt/meta.json"
+
+sk "$SWAPKIN" -p codex usage >/dev/null
+newfmt_label=$(jq -r '.limits[0].label' "$SWAPKIN_DIR/providers/codex/newfmt/usage.json" 2>/dev/null)
+newfmt_pct=$(jq -r '.limits[0].percent' "$SWAPKIN_DIR/providers/codex/newfmt/usage.json" 2>/dev/null)
+newfmt_weekly_label=$(jq -r '.limits[1].label' "$SWAPKIN_DIR/providers/codex/newfmt/usage.json" 2>/dev/null)
+newfmt_resets=$(jq -r '.limits[0].resetsAt' "$SWAPKIN_DIR/providers/codex/newfmt/usage.json" 2>/dev/null)
+assert_eq "new-format: 300min window labelled '5h window'" "5h window" "$newfmt_label"
+assert_eq "new-format: percent converted from used_percent" "0.42" "$newfmt_pct"
+assert_eq "new-format: 10080min window labelled 'Weekly'" "Weekly" "$newfmt_weekly_label"
+assert_contains "new-format: resets_at (unix seconds) turned into ISO" "$newfmt_resets" "T"
+
+oldfmt_label=$(jq -r '.limits[0].label' "$SWAPKIN_DIR/providers/codex/oldfmt/usage.json" 2>/dev/null)
+oldfmt_pct=$(jq -r '.limits[0].percent' "$SWAPKIN_DIR/providers/codex/oldfmt/usage.json" 2>/dev/null)
+oldfmt_resets=$(jq -r '.limits[0].resetsAt' "$SWAPKIN_DIR/providers/codex/oldfmt/usage.json" 2>/dev/null)
+assert_eq "old-format: 300min window labelled '5h window'" "5h window" "$oldfmt_label"
+assert_eq "old-format: percent converted from used_percent" "0.09" "$oldfmt_pct"
+assert_contains "old-format: resets_in_seconds turned into ISO" "$oldfmt_resets" "T"
+
 # ======================================================= 9. providers --json shape ==
 echo "9. providers --json output validates against the documented shape"
 S=$(sandbox)
@@ -112,6 +170,27 @@ shape_ok=$(jq -e '
 assert_eq "providers --json matches the documented shape" "yes" "$shape_ok"
 assert_contains "the claude provider with its saved account is present" "$out" '"id":"claude"'
 
+# ==================================== 11. H2: remove providers / path traversal ==
+echo "11. remove providers is rejected; path traversal in remove is rejected"
+S=$(sandbox)
+export HOME="$S/home" SWAPKIN_DIR="$S/data" CLAUDE_CONFIG_DIR="$S/home/.claude" \
+       XDG_CONFIG_HOME="$S/config" XDG_STATE_HOME="$S/state" XDG_CACHE_HOME="$S/cache" \
+       PATH="$STUBS:$PATH"
+mkdir -p "$SWAPKIN_DIR/providers/codex/other"
+jq -n --arg h "$S/codex-home" '{home:$h}' > "$SWAPKIN_DIR/providers/codex/other/codex.json"
+jq -n '{colour:"#7fa7d9"}' > "$SWAPKIN_DIR/providers/codex/other/meta.json"
+
+out=$("$SWAPKIN" -p claude remove providers 2>&1); rc=$?
+echo "$out" >> "$ALL_OUTPUT_LOG"
+assert_true [ "$rc" -ne 0 ]
+assert_contains "'providers' is rejected as an account name" "$out" "reserved"
+assert_true [ -d "$SWAPKIN_DIR/providers/codex/other" ]
+
+out=$("$SWAPKIN" -p codex remove '../x' 2>&1); rc=$?
+echo "$out" >> "$ALL_OUTPUT_LOG"
+assert_true [ "$rc" -ne 0 ]
+assert_contains "path traversal in remove is rejected" "$out" "account names use"
+
 # ============================================ 13. M2: malformed usage.json ==
 echo "13. a non-object usage.json never breaks providers --json / list --json"
 S=$(sandbox)
@@ -137,6 +216,82 @@ out2=$("$SWAPKIN" list --json 2>&1); rc2=$?
 echo "$out2" >> "$ALL_OUTPUT_LOG"
 assert_eq "list --json still exits 0 with a malformed usage.json on disk" 0 "$rc2"
 assert_true json_valid "$out2"
+
+# ============================================== 14. M3: codex 'Not logged in' ==
+echo "14. codex add refuses on 'Not logged in'; accepts a keyring-only login for add and use"
+S=$(sandbox)
+export HOME="$S/home" SWAPKIN_DIR="$S/data" XDG_CONFIG_HOME="$S/config" \
+       XDG_STATE_HOME="$S/state" XDG_CACHE_HOME="$S/cache" PATH="$STUBS:$PATH"
+mkdir -p "$S/codex-home-notloggedin" "$S/codex-home-keyring"
+mk_stub codex "
+case \"\$1 \$2\" in
+  'login status')
+    case \"\$CODEX_HOME\" in
+      *codex-home-notloggedin) echo 'Not logged in'; exit 1 ;;
+      *codex-home-keyring) echo 'Logged in using ChatGPT'; exit 0 ;;
+    esac ;;
+esac
+"
+out=$(CODEX_HOME="$S/codex-home-notloggedin" "$SWAPKIN" -p codex add notloggedin 2>&1); rc=$?
+echo "$out" >> "$ALL_OUTPUT_LOG"
+assert_true [ "$rc" -ne 0 ]
+assert_contains "'Not logged in' is refused, not accepted as a substring match" "$out" "no Codex login found"
+
+out2=$(CODEX_HOME="$S/codex-home-keyring" "$SWAPKIN" -p codex add keyringacct 2>&1); rc2=$?
+echo "$out2" >> "$ALL_OUTPUT_LOG"
+assert_eq "a keyring-only login (no auth.json) is accepted by add" 0 "$rc2"
+mkdir -p "$SWAPKIN_DIR/providers/codex/other"
+jq -n --arg h "$S/codex-other-home" '{home:$h}' > "$SWAPKIN_DIR/providers/codex/other/codex.json"
+jq -n '{colour:"#d97757"}' > "$SWAPKIN_DIR/providers/codex/other/meta.json"
+echo other > "$SWAPKIN_DIR/providers/codex/active"
+out3=$(CODEX_HOME="$S/codex-home-keyring" "$SWAPKIN" -p codex use keyringacct 2>&1); rc3=$?
+echo "$out3" >> "$ALL_OUTPUT_LOG"
+assert_eq "the same keyring-only login is accepted by use too, without auth.json" 0 "$rc3"
+
+# ==================================================== 15. M8: run -- passthrough ==
+echo "15. run -- passes every following argument to the child untouched, including -p"
+S=$(sandbox)
+export HOME="$S/home" SWAPKIN_DIR="$S/data" XDG_CONFIG_HOME="$S/config" \
+       XDG_STATE_HOME="$S/state" XDG_CACHE_HOME="$S/cache" PATH="$STUBS:$PATH"
+CODEX_ARGV_LOG="$S/codex-argv.log"
+mk_stub codex "echo \"\$@\" > \"$CODEX_ARGV_LOG\""
+mkdir -p "$SWAPKIN_DIR/providers/codex/work"
+jq -n --arg h "$S/codex-home" '{home:$h}' > "$SWAPKIN_DIR/providers/codex/work/codex.json"
+jq -n '{colour:"#7fa7d9"}' > "$SWAPKIN_DIR/providers/codex/work/meta.json"
+echo work > "$SWAPKIN_DIR/providers/codex/active"
+
+sk "$SWAPKIN" run codex -- -p myprofile exec hi >/dev/null
+argv=$(cat "$CODEX_ARGV_LOG" 2>/dev/null)
+assert_eq "codex's own -p reaches it unchanged" "-p myprofile exec hi" "$argv"
+
+# ============================================ 17. M5: cold remove vs a live process ==
+echo "17. codex remove refuses while a running process holds that CODEX_HOME open"
+S=$(sandbox)
+export HOME="$S/home" SWAPKIN_DIR="$S/data" XDG_CONFIG_HOME="$S/config" \
+       XDG_STATE_HOME="$S/state" XDG_CACHE_HOME="$S/cache" PATH="$STUBS:$PATH"
+mkdir -p "$S/codex-home-busy" "$S/codex-home-current"
+mkdir -p "$SWAPKIN_DIR/providers/codex/busy" "$SWAPKIN_DIR/providers/codex/current"
+jq -n --arg h "$S/codex-home-busy" '{home:$h}' > "$SWAPKIN_DIR/providers/codex/busy/codex.json"
+jq -n '{colour:"#7fa7d9"}' > "$SWAPKIN_DIR/providers/codex/busy/meta.json"
+jq -n --arg h "$S/codex-home-current" '{home:$h}' > "$SWAPKIN_DIR/providers/codex/current/codex.json"
+jq -n '{colour:"#d97757"}' > "$SWAPKIN_DIR/providers/codex/current/meta.json"
+echo current > "$SWAPKIN_DIR/providers/codex/active"
+
+CODEX_HOME="$S/codex-home-busy" sleep 30 &
+BUSY_PID=$!
+sleep 0.3
+
+out=$("$SWAPKIN" -p codex remove busy 2>&1); rc=$?
+echo "$out" >> "$ALL_OUTPUT_LOG"
+assert_true [ "$rc" -ne 0 ]
+assert_contains "remove refuses while a running process still holds that CODEX_HOME" "$out" "in use"
+assert_true [ -d "$SWAPKIN_DIR/providers/codex/busy" ]
+
+kill "$BUSY_PID" 2>/dev/null; wait "$BUSY_PID" 2>/dev/null
+
+out2=$("$SWAPKIN" -p codex remove busy 2>&1); rc2=$?
+echo "$out2" >> "$ALL_OUTPUT_LOG"
+assert_eq "remove succeeds once no process holds that CODEX_HOME any more" 0 "$rc2"
 
 # ==================================== 18. M7: watchdog auto-switch takes the lock ==
 echo "18. the watchdog's auto-switch waits for \$ACCOUNTS/.lock instead of racing a concurrent use"
