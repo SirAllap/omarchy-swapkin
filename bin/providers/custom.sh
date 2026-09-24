@@ -12,14 +12,85 @@ expand_path() { # path (may start with ~)
 
 # Custom providers can only touch files under $HOME: nothing under the repo,
 # nothing system-wide, nothing an invented entry could point somewhere unsafe.
+#
+# The maintainer rejected this exact resolve-then-check shape for icon_for()
+# twice (marketplace #8127, #8376): `readlink -f -m` canonicalises the string
+# once, but every write that follows re-resolves the same string from
+# scratch, so an ancestor swapped for a symlink between the check and the
+# write (mkdir/mktemp/mv) is followed anyway. SirAllap's own fix for
+# icon_for() (#8376's close) sidestepped the problem by removing the write
+# entirely — notification icons became a fixed lookup table with nothing to
+# stage or rename — so there is no reusable write-time helper in this repo to
+# call here; custom-provider files are written by design, so removal is not
+# an option.
+#
+# Instead this walks from a descriptor opened on $HOME itself (the "trusted
+# HOME descriptor" the maintainer asked for in #8376) one path component at a
+# time, refusing `.`/`..`/empty components outright and checking each
+# intermediate directory is not a symlink before opening *it* relatively
+# (`/proc/self/fd/$fd/$comp`, resolved from the held descriptor, not from
+# $HOME re-read off disk) to get the next descriptor. The path returned is
+# itself `/proc/self/fd/<parent-dir-fd>/<leaf>`: every mkdir/mktemp/cp/mv a
+# caller does with it is therefore descriptor-relative too, not a second
+# string re-resolution, so there is no window left between validating the
+# ancestors and using them.
+#
+# Sets $REPLY rather than echoing: the held fd only means anything inside
+# the process that opened it, and `x=$(under_home ...)` would run this in a
+# throwaway subshell that exits — closing the fd — the instant the command
+# substitution returns its string, before the caller ever touches it. Call
+# this directly, on its own line, never inside $(...).
 under_home() { # path
-  local p home
-  p=$(readlink -f -m "$1" 2>/dev/null || echo "$1")
-  home=$(readlink -f -m "$HOME")
-  # An exact match, or a "$home/" prefix (L2): a bare string-prefix test
-  # would also accept a sibling directory like /home/u2 for HOME=/home/u.
-  [[ $p == "$home" || $p == "$home"/* ]] || die "custom provider path '$1' must resolve under \$HOME"
-  echo "$p"
+  local target="$1" rel comp fd next
+  case $target in
+    "$HOME") rel="" ;;
+    "$HOME"/*) rel="${target#"$HOME"/}" ;;
+    *) die "custom provider path '$target' must resolve under \$HOME" ;;
+  esac
+  [[ -n $rel ]] || die "custom provider path '$target' must resolve under \$HOME"
+
+  exec {fd}<"$HOME" || die "custom provider path '$target': cannot open \$HOME"
+  while :; do
+    comp="${rel%%/*}"
+    [[ $rel == */* ]] && rel="${rel#*/}" || rel=""
+    if [[ -z $comp || $comp == "." || $comp == ".." ]]; then
+      exec {fd}<&-
+      die "custom provider path '$target' must resolve under \$HOME"
+    fi
+    if [[ -L "/proc/self/fd/$fd/$comp" ]]; then
+      exec {fd}<&-
+      die "custom provider path '$target' has a symlinked component; refusing"
+    fi
+    if [[ -z $rel ]]; then
+      # Leaf component: hand back a descriptor-relative path through the
+      # still-open parent directory fd. Caller's mkdir/mktemp/cp/mv resolve
+      # the last step from this held descriptor, not from a fresh $HOME walk.
+      REPLY="/proc/self/fd/$fd/$comp"
+      return
+    fi
+    [[ -d "/proc/self/fd/$fd/$comp" ]] || {
+      exec {fd}<&-
+      die "custom provider path '$target': no such directory"
+    }
+    exec {next}<"/proc/self/fd/$fd/$comp" || {
+      exec {fd}<&-
+      die "custom provider path '$target': cannot open directory"
+    }
+    exec {fd}<&-
+    fd=$next
+  done
+}
+
+# Same validated walk as under_home(), collapsed to a stable plain string.
+# Only for a value that gets *persisted* (custom.json's cold "home" field,
+# read back by a later, separate process where a live fd means nothing) —
+# every immediate mkdir/mktemp/cp/mv keeps using under_home()'s
+# descriptor-relative path directly. Safe to collapse here because it reads
+# the real path back off the fd under_home() just validated and still holds
+# open, rather than re-walking the original string a second time.
+under_home_path() { # path
+  under_home "$1"
+  readlink -f "$REPLY"
 }
 
 login_files() { jq -r '.loginFiles[]? // empty' <<<"$_CUSTOM_ENTRY"; }
@@ -31,7 +102,7 @@ live_files_hash() {
   local f real out=""
   while IFS= read -r f; do
     [[ -n $f ]] || continue
-    real=$(under_home "$(expand_path "$f")")
+    under_home "$(expand_path "$f")"; real=$REPLY
     if [[ -f $real ]]; then
       out+="$(sha256sum "$real" 2>/dev/null | cut -d' ' -f1)"
     else
@@ -56,7 +127,7 @@ p_save() {
   local i=0 f
   while IFS= read -r f; do
     [[ -n $f ]] || continue
-    local real; real=$(under_home "$(expand_path "$f")")
+    local real; under_home "$(expand_path "$f")"; real=$REPLY
     if [[ -f $real ]]; then
       local tmp; tmp=$(mktemp "$dir/files/$i.XXXXXX")
       cp "$real" "$tmp"
@@ -80,7 +151,7 @@ p_add() { # name
       local i=0 f
       while IFS= read -r f; do
         [[ -n $f ]] || continue
-        local real; real=$(under_home "$(expand_path "$f")")
+        local real; under_home "$(expand_path "$f")"; real=$REPLY
         [[ -f $real ]] || die "no live file at $f; sign in with $P_CMD first, then run add"
         cp "$real" "$dir/files/$i"
         i=$((i + 1))
@@ -115,7 +186,7 @@ p_add() { # name
     local i=0 f
     while IFS= read -r f; do
       [[ -n $f ]] || continue
-      local real; real=$(under_home "$(expand_path "$f")")
+      local real; under_home "$(expand_path "$f")"; real=$REPLY
       [[ -f $real ]] || die "no live file at $f after signing in"
       cp "$real" "$dir/files/$i"
       i=$((i + 1))
@@ -131,7 +202,7 @@ p_add() { # name
 
   # cold
   local env_key; env_key=$(jq -r '.homeEnv' <<<"$_CUSTOM_ENTRY")
-  local default_home; default_home=$(under_home "$(expand_path "$(jq -r '.defaultHome' <<<"$_CUSTOM_ENTRY")")")
+  local default_home; default_home=$(under_home_path "$(expand_path "$(jq -r '.defaultHome' <<<"$_CUSTOM_ENTRY")")")
   if [[ -z $(profiles) ]]; then
     mkdir -p "$dir"
     jq -n --arg home "$default_home" '{mode:"cold", home:$home}' > "$dir/custom.json.tmp"
@@ -175,7 +246,7 @@ p_use() { # name
     local i=0 f real
     while IFS= read -r f; do
       [[ -n $f ]] || continue
-      real=$(under_home "$(expand_path "$f")")
+      under_home "$(expand_path "$f")"; real=$REPLY
       [[ -f $dir/files/$i ]] || die "'$name' has no saved copy of $f; nothing changed"
       [[ -f $real ]] || die "no live file at $f; nothing changed"
       i=$((i + 1))
@@ -184,7 +255,7 @@ p_use() { # name
     i=0
     while IFS= read -r f; do
       [[ -n $f ]] || continue
-      real=$(under_home "$(expand_path "$f")")
+      under_home "$(expand_path "$f")"; real=$REPLY
       local tmp; tmp=$(mktemp "$real.XXXXXX")
       cp "$dir/files/$i" "$tmp"
       chmod --reference="$real" "$tmp" 2>/dev/null || true

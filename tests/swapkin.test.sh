@@ -550,6 +550,44 @@ wait "$LOCK_PID" 2>/dev/null
 assert_true [ "$elapsed" -ge 2 ]
 assert_eq "auto-switch only lands once the lock is free" "roomy" "$(cat "$SWAPKIN_DIR/active")"
 
+# ==================== 20. custom provider writes refuse a symlinked ancestor ==
+echo "20. custom provider writes refuse a symlinked ancestor, normal writes still work"
+S=$(sandbox)
+export HOME="$S/home" SWAPKIN_DIR="$S/data" XDG_CONFIG_HOME="$S/config" \
+       XDG_STATE_HOME="$S/state" XDG_CACHE_HOME="$S/cache" PATH="$STUBS:$PATH"
+mkdir -p "$XDG_CONFIG_HOME/swapkin" "$HOME/.acme"
+cat > "$XDG_CONFIG_HOME/swapkin/providers.json" <<JSON
+{"providers":[{"id":"acme","name":"Acme CLI","command":"acme","mode":"hot","loginFiles":["~/.acme/session.json"]}]}
+JSON
+chmod 600 "$XDG_CONFIG_HOME/swapkin/providers.json"
+echo '{"session":"work-session-live"}' > "$HOME/.acme/session.json"
+
+# Baseline: a normal, non-symlinked login file is saved fine.
+out=$(sk "$SWAPKIN" -p acme add work)
+assert_contains "normal custom-provider add still succeeds" "$out" "Saved 'work'."
+saved=$(cat "$SWAPKIN_DIR/providers/acme/work/files/0" 2>/dev/null)
+assert_eq "the saved copy has the live session content" '{"session":"work-session-live"}' "$saved"
+
+# Attack: ~/.acme (an ancestor of the login file, not the leaf itself) is
+# replaced with a symlink pointing outside $HOME, at a target that itself
+# holds a file named session.json — this is exactly the ancestor-swap shape
+# the maintainer flagged in #8376, aimed at custom.sh's own writes instead
+# of icon_for()'s.
+OUTSIDE="$S/outside-home"
+mkdir -p "$OUTSIDE"
+echo '{"session":"attacker-planted"}' > "$OUTSIDE/session.json"
+rm -rf "$HOME/.acme"
+ln -s "$OUTSIDE" "$HOME/.acme"
+
+rm -rf "$SWAPKIN_DIR/providers/acme/mallory"
+out=$("$SWAPKIN" -p acme add mallory 2>&1); rc=$?
+echo "$out" >> "$ALL_OUTPUT_LOG"
+assert_true [ "$rc" -ne 0 ]
+assert_contains "the symlinked ancestor is refused, not followed" "$out" "swapkin:"
+assert_true [ ! -e "$SWAPKIN_DIR/providers/acme/mallory/custom.json" ]
+outside_untouched=$(cat "$OUTSIDE/session.json")
+assert_eq "the file outside \$HOME is never read as a live login" '{"session":"attacker-planted"}' "$outside_untouched"
+
 # ================================================================== summary ==
 echo
 echo "19. no captured test output contains a fixture token string"
