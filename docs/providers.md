@@ -22,10 +22,10 @@ default, unchanged.
 
 Three modes:
 
-- **hot** — one shared login file (Claude, or a custom hot provider). A switch
-  saves the outgoing account's live login back into its own profile, then
-  overwrites the live file with the incoming account's. Open sessions notice
-  on their next request.
+- **hot** — one shared login file (Claude Code only; see below for why a
+  custom provider cannot be hot). A switch saves the outgoing account's live
+  login back into its own profile, then overwrites the live file with the
+  incoming account's. Open sessions notice on their next request.
 - **cold** — a separate home per account (Codex, or a custom cold provider).
   A switch only moves a pointer: `swapkin use <name>` decides which account
   *new* sessions get. Point a shell at one with `eval "$(swapkin env <id>)"`,
@@ -72,8 +72,8 @@ $SWAPKIN_DIR/providers/<id>/active
 ```json
 {
   "providers": [
-    { "id": "mytool", "name": "My Tool", "command": "mytool", "mode": "hot",
-      "loginFiles": ["~/.mytool/auth.json"],
+    { "id": "mytool", "name": "My Tool", "command": "mytool", "mode": "cold",
+      "homeEnv": "MYTOOL_HOME", "defaultHome": "~/.mytool",
       "usageCommand": "mytool usage --json" },
 
     { "id": "other", "name": "Other", "command": "other", "mode": "cold",
@@ -86,25 +86,26 @@ $SWAPKIN_DIR/providers/<id>/active
 
 - `id` follows the same rules as an account name (`a-z0-9_-`) and can't reuse
   a built-in id (`claude`, `codex`, `copilot`).
-- Every path is expanded from `~` and must resolve under `$HOME` — nothing
-  outside it, nothing that could point at the repo or the system.
+- **Custom providers are cold-only.** An entry with `"mode": "hot"` (or any
+  mode other than `cold`), or with a `loginFiles` array, is ignored with a
+  warning on stderr, before anything is created for it. Hot mode overwrites
+  a live login file at a path the user supplies. Validating that write path
+  safely against symlink swaps between the check and the write could not be
+  done reliably in bash (each `mkdir`/`mktemp`/`mv` re-resolves the path
+  from scratch, so an ancestor swapped for a symlink in between is followed
+  anyway), so hot stays a built-in-only mode with fixed, hardcoded paths.
+  Cold mode has no such write: swapkin never writes into `defaultHome`, and
+  every file it creates for a later account lives under its own
+  `<profile>/home`.
+- `defaultHome` is expanded from `~` and must resolve under `$HOME`,
+  following symlinks: `~/.mytool` symlinked into `~/dotfiles/mytool` is
+  fine, a link that leads outside `$HOME` is refused. `$HOME` itself (`"~"`)
+  is refused too, and only a leading `~` is expanded — `~user` is not. The
+  resolved path is what is stored.
 - The file is **ignored, with a warning on stderr**, unless it is owned by
   you and not writable by your group or anyone else. It runs commands
   (`usageCommand`, `loginCommand`), so a config an attacker could edit is a
   config swapkin will not read.
-- **hot**: `loginFiles` are the files that hold the login. The first `add`
-  captures whatever is live now (a copy under `<profile>/files/<index>`).
-  Every later `add` does, in this order: save the currently-active account's
-  live files back into its own profile *first* — before printing anything —
-  then ask you to sign in with the tool, then poll (up to 900s) until the
-  live files actually change, then capture the changed files as the new
-  account. `add` never saves the live login back a second time after you've
-  signed in, so a login you make while `add` is waiting can never land under
-  the old account's name. `use` first checks that every saved copy in the
-  target account's profile, and every corresponding live file, exist — it
-  refuses and changes nothing if either is missing — then saves the
-  outgoing account back and swaps in the target account's copies with an
-  atomic replace (temp file + `mv`, same file mode).
 - **cold**: `homeEnv` is the environment variable your tool reads for its
   home directory; `defaultHome` is where the existing login already lives.
   The first account references `defaultHome` directly — never copied, since

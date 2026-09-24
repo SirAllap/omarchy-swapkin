@@ -118,15 +118,15 @@ runs that provider's own CLI with the same environment already set.
 
 ## Your own tools
 
-Any tool that keeps a login in a file, or a separate home directory per
-account, can be added without touching Swapkin's code. Describe it in
+Any tool that reads its home directory from an environment variable can be
+added without touching Swapkin's code. Describe it in
 `~/.config/swapkin/providers.json`:
 
 ```json
 {
   "providers": [
-    { "id": "acme-cli", "name": "Acme CLI", "command": "acme", "mode": "hot",
-      "loginFiles": ["~/.acme/session.json"] },
+    { "id": "acme-cli", "name": "Acme CLI", "command": "acme", "mode": "cold",
+      "homeEnv": "ACME_HOME", "defaultHome": "~/.acme", "loginCommand": "acme login" },
 
     { "id": "widget-agent", "name": "Widget Agent", "command": "widget", "mode": "cold",
       "homeEnv": "WIDGET_HOME", "defaultHome": "~/.widget" }
@@ -134,11 +134,17 @@ account, can be added without touching Swapkin's code. Describe it in
 }
 ```
 
-`acme-cli` is a **hot** example: one shared login file, swapped in place, so
-a running `acme` session sees the new account on its next message — same as
-Claude Code. `widget-agent` is a **cold** example: a separate home directory
-per account, so only a `widget` process started after `swapkin use` gets the
-new one. Full contract (safety rules, `usageCommand`, sign-in flow) in
+Both are **cold**: a separate home directory per account, so only an `acme`
+or `widget` process started after `swapkin use` gets the new one. `acme-cli`
+also names a `loginCommand`, which `add` runs with `ACME_HOME` pointed at the
+new account's home so you can sign in.
+
+Custom providers are cold-only. **Hot** mode — one shared login file swapped
+in place, so a running session sees the new account on its next message — is
+built in for Claude Code only: it overwrites a login file at a path the
+config names, and that write could not be made safe against a symlink swap
+in bash. A custom entry with `"mode": "hot"` or `loginFiles` is ignored with
+a warning. Full contract (safety rules, `usageCommand`, sign-in flow) in
 [`docs/providers.md`](docs/providers.md).
 
 ## Demo mode

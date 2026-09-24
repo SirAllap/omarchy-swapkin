@@ -205,10 +205,22 @@ load_adapter() { # id
       P_ID="$id"
       P_NAME=$(jq -r '.name // .id' <<<"$entry")
       P_MODE=$(jq -r '.mode' <<<"$entry")
+      # Custom providers are cold-only. Hot mode overwrites a live login file
+      # at a path the config supplies, and that write could not be made safe
+      # in bash against an ancestor swapped for a symlink between the check
+      # and the write. Refuse the entry here, before custom.sh is sourced and
+      # before anything is created under the provider's root. A leftover
+      # loginFiles array is refused too, even under "cold": it only ever meant
+      # hot mode, and silently ignoring it would leave a user believing their
+      # login files are being swapped.
+      if [[ $P_MODE != cold ]] || jq -e '(.loginFiles // []) | length > 0' >/dev/null 2>&1 <<<"$entry"; then
+        echo "swapkin: ignoring custom provider '$id' (custom providers are cold-only; 'hot' and 'loginFiles' are not supported)" >&2
+        return 1
+      fi
       P_CMD=$(jq -r '.command' <<<"$entry")
       P_MARKER="custom.json"
-      P_STORE=$(jq -r 'if .mode=="hot" then (.loginFiles // [] | join(", ")) else (.homeEnv // "") end' <<<"$entry")
-      P_HOMEVAR=$(jq -r 'if .mode=="cold" then (.homeEnv // "") else "" end' <<<"$entry")
+      P_STORE=$(jq -r '.homeEnv // ""' <<<"$entry")
+      P_HOMEVAR=$P_STORE
       # L1: homeEnv reaches `export $HOMEVAR=...` inside `eval "$(swapkin env)"`
       # in every shell rc, so a bad value is a shell injection, not just a
       # bad variable name. Require a normal env-var name and refuse the ones
