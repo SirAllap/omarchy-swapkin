@@ -2,10 +2,10 @@
   "schemaVersion": 1,
   "id": "io.github.sirallap.swapkin",
   "name": "Swapkin",
-  "version": "0.1.0",
+  "version": "0.2.0",
   "author": "SirAllap",
   "license": "MIT",
-  "description": "Never get blocked by Claude Code limits again \u2014 Swapkin tracks weekly pace across every account and switches between them from the Omarchy bar in one click.",
+  "description": "Never get blocked by coding agent limits again \u2014 Swapkin tracks weekly pace across Claude Code, Codex, Copilot and your own providers, and switches accounts from the Omarchy bar in one click.",
   "kinds": [
     "bar-widget",
     "service"
@@ -17,7 +17,7 @@
   },
   "barWidget": {
     "displayName": "Swapkin",
-    "description": "Claude Code limits, weekly pace and token history, plus switching between your Claude accounts. The idle account's limits stay visible, dimmed.",
+    "description": "Usage limits, weekly budget pace and token history for Claude Code, Codex, Copilot and custom providers, plus switching between accounts. The idle account's limits stay visible, dimmed.",
     "category": "AI",
     "aliases": [
       "agents",
