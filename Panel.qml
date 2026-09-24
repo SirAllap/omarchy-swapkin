@@ -460,6 +460,12 @@ Panel {
     return isFinite(value) ? value : 0
   }
 
+  // A tool that reports no plan gets just the name, not a dangling dot.
+  function nameAndPlan(a) {
+    var plan = accountPlan(a)
+    return a.name + (plan ? " · " + plan : "")
+  }
+
   function accountPlan(a) {
     return String((a && (a.tierLabel || a.plan)) || "")
   }
@@ -684,7 +690,7 @@ Panel {
             width: parent.width
             title: "Swapkin"
             meta: root.activeAccount
-              ? root.activeAccount.name + " · " + root.accountPlan(root.activeAccount)
+              ? root.nameAndPlan(root.activeAccount)
               : root.heroMeta(root.provider)
             foreground: root.foreground
             fontFamily: root.fontFamily
@@ -938,7 +944,7 @@ Panel {
                         anchors.rightMargin: Style.space(10)
                         anchors.verticalCenter: parent.verticalCenter
                         elide: Text.ElideRight
-                        text: manageEntry.modelData.name + " · " + root.accountPlan(manageEntry.modelData)
+                        text: root.nameAndPlan(manageEntry.modelData)
                         color: manageEntry.modelData.active ? root.foreground : root.dim
                         font.family: root.fontFamily
                         font.pixelSize: Style.font.bodySmall
@@ -1256,7 +1262,7 @@ Panel {
                 PanelSectionHeader {
                   // The header doubles as the progress light: a probe takes about
                   // a second, and a silent stale number is worse than saying so.
-                  text: (root.hasAccounts && !!root.candidate ? root.candidate.name.toUpperCase() + " · " + root.accountPlan(root.candidate).toUpperCase()
+                  text: (root.hasAccounts && !!root.candidate ? root.nameAndPlan(root.candidate).toUpperCase()
                                            : "LIMITS")
                     + (root.hasAccounts && !!root.candidate && !root.candidate.active ? " · PREVIEW" : "")
                     + (root.accountsRefreshing ? " · UPDATING" : "")
@@ -1613,7 +1619,7 @@ Panel {
         width: parent.width
         elide: Text.ElideRight
         text: providerRow.rowActive
-          ? providerRow.rowActive.name + " · " + root.accountPlan(providerRow.rowActive)
+          ? root.nameAndPlan(providerRow.rowActive)
           : root.heroMeta(providerRow.provider)
         color: root.dim
         font.family: root.fontFamily
