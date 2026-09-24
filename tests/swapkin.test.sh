@@ -563,6 +563,10 @@ else
   ok "no captured test output contains any fixture token string"
 fi
 
+echo "shipped demo data"
+shipped=$(SWAPKIN_DEMO=1 SWAPKIN_DEMO_FILE= "$ROOT/bin/swapkin" providers --json 2>&1 || true)
+assert_true jq -e '.demo and (.providers | length >= 3) and all(.providers[].accounts[].limits[]; (.resetsAt // "") | test("^[0-9]{4}-") or . == "")' <<<"$shipped"
+
 echo
 echo "$PASS passed, $FAIL failed"
 (( FAIL == 0 ))

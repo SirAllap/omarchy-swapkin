@@ -240,7 +240,7 @@
               "used": 310,
               "limit": 500,
               "unit": "requests",
-              "resetsInMin": 12000
+              "resetsAt": "next-month"
             }
           ],
           "counts": [
@@ -264,7 +264,7 @@
               "used": 42,
               "limit": 300,
               "unit": "requests",
-              "resetsInMin": 12000
+              "resetsAt": "next-month"
             }
           ],
           "counts": [],

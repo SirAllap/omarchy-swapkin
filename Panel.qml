@@ -430,7 +430,9 @@ Panel {
       return "Open sessions use " + candidate.name + " on their next message."
     }
     if (roomier) return roomier.name + " has " + Math.round((1 - accountWeekly(roomier)) * 100) + "% of its week free."
-    return accounts.length > 1 ? "Open sessions follow a switch on their next message." : "One account. Add another in manage."
+    if (accounts.length < 2) return "One account. Add another in manage."
+    // The provider's own words: only a hot one moves open sessions along.
+    return String((root.provider && root.provider.modeWords) || "Open sessions follow a switch on their next message.")
   }
 
   // Only offer colours nobody else is using, plus this account's own.

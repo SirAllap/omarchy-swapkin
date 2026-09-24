@@ -238,11 +238,14 @@ demo_file() { echo "${SWAPKIN_DEMO_FILE:-$REPO_ROOT/demo/providers.json}"; }
 demo_providers_json() {
   local f; f=$(demo_file)
   [[ -f $f ]] || { echo '{"demo":true,"providers":[]}'; return; }
-  jq --argjson now "$(date -u +%s)" '
+  # A monthly quota resets on the 1st at 00:00 UTC, so it gets a real date
+  # instead of an offset that would land at a random hour.
+  jq --argjson now "$(date -u +%s)" --arg nextMonth "$(date -u -d "$(date -u +%Y-%m-01) +1 month" +%Y-%m-01T00:00:00Z)" '
     def toIso(mins): ($now + (mins*60)) | todate;
     .demo = true
     | .providers |= map(.accounts |= map(
-        .limits |= (map(if has("resetsInMin") then (.resetsAt = toIso(.resetsInMin) | del(.resetsInMin)) else . end))
+        .limits |= (map(if has("resetsInMin") then (.resetsAt = toIso(.resetsInMin) | del(.resetsInMin))
+                         elif .resetsAt == "next-month" then (.resetsAt = $nextMonth) else . end))
       ))
   ' "$f"
 }
