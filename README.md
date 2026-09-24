@@ -12,14 +12,19 @@ message.
 
 ## What it does
 
-- **Switch accounts from the bar.** Two accounts get a chip each; three or more
-  get a list, ordered by whichever has the most weekly quota left.
+- **A wide popover with two columns.** Providers on the left, the one you picked
+  on the right, and a "next message is paid by" strip on top. On a screen tall
+  enough it never scrolls; on a shorter one the columns scroll inside it.
+- **Switch accounts from the bar.** Every account is a card. Move over one to
+  preview its limits, then switch. Keys: `↑` `↓` provider, `←` `→` account,
+  `a` switch, `m` manage, `r` refresh.
 - **Each account keeps its own colour**, shown in the bar icon, the account list
   and, if you want it, the Claude Code status line.
 - **Limits for every account**, not only the active one: session window, weekly
   window and any model-specific window the plan has.
-- **Pace, not just a percentage.** `Day 4/7 · budget 48% · 5% ahead of pace`,
-  and, when the maths says so, `At this pace it runs out in 3d 0h`.
+- **Pace, not just a percentage.** `13% used · budget 20% · 7% under pace`,
+  `At this rate: about 64% at reset`, and the reset time. The budget grows only
+  during the days and hours you work (see below).
 - **A watchdog while the panel is closed.** It warns once when the active
   account passes your threshold. Hand-over when an account is spent is opt-in.
 - **Today's tokens at API prices**, as an estimate you can sanity-check.
@@ -105,11 +110,16 @@ Behaviour lives in `~/.local/share/swapkin/config.json`:
   account with the most room left, with a notification saying so. Left off, you
   get the warning and decide yourself.
 
-The watchdog interval is a widget setting:
+The watchdog interval and the weekly budget are widget settings:
 
 ```bash
 omarchy bar set io.github.sirallap.swapkin watchIntervalMin 5 --json
 ```
+
+`budgetSpread` (`Working days` or `Every day`), `budgetDays` (`Mon,Tue,Wed,Thu,Fri`),
+`budgetStartHour` (9) and `budgetEndHour` (19) shape the pace curve: only those
+hours earn weekly budget. With no working day picked, or an end hour that is not
+after the start, the budget grows evenly all week.
 
 `prices.json`, next to the plugin, holds the per-million-token rates used for the
 "at API prices" line. They change; edit the file rather than the code.
