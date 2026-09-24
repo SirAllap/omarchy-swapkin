@@ -107,6 +107,12 @@ per account, so only a `widget` process started after `swapkin use` gets the
 new one. Full contract (safety rules, `usageCommand`, sign-in flow) in
 [`docs/providers.md`](docs/providers.md).
 
+## Demo mode
+
+`swapkin demo on` shows the panel filled with invented accounts and numbers
+instead of your real ones — handy for a screenshot. `swapkin demo off` turns
+it back off. Nothing it does ever reads or writes a real login.
+
 ## Commands
 
 | Command | What it does |

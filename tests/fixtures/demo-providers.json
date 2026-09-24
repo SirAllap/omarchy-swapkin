@@ -1,0 +1,31 @@
+{
+  "providers": [
+    {
+      "id": "claude",
+      "name": "Claude Code",
+      "mode": "hot",
+      "modeLabel": "next message",
+      "modeWords": "Open sessions use the new account on their next message.",
+      "store": "~/.claude/.credentials.json",
+      "how": "test",
+      "addHint": "test",
+      "installed": true,
+      "sessions": 1,
+      "accounts": [
+        {
+          "name": "work",
+          "active": true,
+          "colour": "#7fa7d9",
+          "plan": "Max",
+          "age": 10,
+          "limits": [
+            { "label": "Weekly (7-day)", "title": "Weekly (7-day)", "percent": 0.2, "resetsInMin": 100 }
+          ],
+          "counts": [],
+          "note": ""
+        }
+      ],
+      "stats": { "recentDays": [], "todayPrompts": 0, "todaySessions": 0, "totalPrompts": 0, "totalSessions": 0, "activeDays": 0 }
+    }
+  ]
+}

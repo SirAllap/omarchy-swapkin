@@ -242,6 +242,34 @@ cat "$S/stderr.log" >> "$ALL_OUTPUT_LOG"
 assert_contains "a warning is printed to stderr" "$(cat "$S/stderr.log")" "ignoring"
 assert_not_contains "the unsafe provider is not in the output" "$out" '"id":"unsafe"'
 
+# ============================================ 8. demo mode: sentinel HOME untouched ==
+echo "8. demo mode leaves a sentinel HOME untouched and never prints sentinel token text"
+S=$(sandbox)
+export HOME="$S/home" SWAPKIN_DIR="$S/data" XDG_CONFIG_HOME="$S/config" \
+       XDG_STATE_HOME="$S/state" XDG_CACHE_HOME="$S/cache" PATH="$STUBS:$PATH" \
+       SWAPKIN_DEMO=1 SWAPKIN_DEMO_FILE="$FIXTURES/demo-providers.json"
+mkdir -p "$HOME/.claude"
+SENTINEL_TOKEN="SENTINEL-REAL-REFRESH-TOKEN-DO-NOT-TOUCH-0000000000"
+jq -n --arg t "$SENTINEL_TOKEN" '{claudeAiOauth:{refreshToken:$t, subscriptionType:"max"}}' > "$HOME/.claude/.credentials.json"
+before_sum=$(md5sum "$HOME/.claude/.credentials.json" | cut -d' ' -f1)
+before_tree=$(find "$HOME" -type f | sort)
+
+demo_out=""
+for args in "providers --json" "list --json" "status" "statusline" "cost" \
+            "use personal" "add personal" "remove personal" "save" "usage" "check" \
+            "env" "-p codex run codex"; do
+  # shellcheck disable=SC2086
+  demo_out+=$(sk "$SWAPKIN" $args)
+  demo_out+=$'\n'
+done
+
+after_sum=$(md5sum "$HOME/.claude/.credentials.json" | cut -d' ' -f1)
+after_tree=$(find "$HOME" -type f | sort)
+assert_eq "sentinel credentials file byte-identical after every demo command" "$before_sum" "$after_sum"
+assert_eq "no files created or removed under the sentinel HOME" "$before_tree" "$after_tree"
+assert_not_contains "no demo output contains the sentinel token" "$demo_out" "$SENTINEL_TOKEN"
+assert_contains "write commands say demo mode, nothing changed" "$demo_out" "demo mode, nothing changed"
+
 # ======================================================= 9. providers --json shape ==
 echo "9. providers --json output validates against the documented shape"
 S=$(sandbox)
@@ -522,3 +550,19 @@ wait "$LOCK_PID" 2>/dev/null
 assert_true [ "$elapsed" -ge 2 ]
 assert_eq "auto-switch only lands once the lock is free" "roomy" "$(cat "$SWAPKIN_DIR/active")"
 
+# ================================================================== summary ==
+echo
+echo "19. no captured test output contains a fixture token string"
+if grep -qF "$LIVE_TOKEN" "$ALL_OUTPUT_LOG" 2>/dev/null \
+   || grep -qF "$STALE_TOKEN" "$ALL_OUTPUT_LOG" 2>/dev/null \
+   || grep -qF "$PERSONAL_TOKEN" "$ALL_OUTPUT_LOG" 2>/dev/null \
+   || grep -qF "$GH_SECRET_TOKEN" "$ALL_OUTPUT_LOG" 2>/dev/null \
+   || grep -qF "$SENTINEL_TOKEN" "$ALL_OUTPUT_LOG" 2>/dev/null; then
+  bad "no captured test output contains any fixture token string"
+else
+  ok "no captured test output contains any fixture token string"
+fi
+
+echo
+echo "$PASS passed, $FAIL failed"
+(( FAIL == 0 ))

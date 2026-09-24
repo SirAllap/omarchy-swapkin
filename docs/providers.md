@@ -152,3 +152,14 @@ or `usage` — because swapkin has no way to tell it apart from that account's
 own login. Sign in through `swapkin add` instead when you mean to add a new
 account, not replace the current one.
 
+## Demo mode
+
+`swapkin demo on` (or `SWAPKIN_DEMO=1`) makes every read command
+(`providers --json`, `list --json`, `status`, `statusline`, `cost`) answer
+from `demo/providers.json` — invented accounts (`work`, `personal`,
+`side-project`) with invented numbers, so a screenshot always looks current
+(reset times are stored as minute offsets and turned into real timestamps at
+read time). Every command that would touch a login or the network — `use`,
+`add`, `remove`, `save`, `colour`, `usage`, `check`, `env`, `run` — prints
+`swapkin: demo mode, nothing changed` and exits, without reading or writing
+anything real.

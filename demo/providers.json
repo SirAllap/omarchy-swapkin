@@ -1,0 +1,336 @@
+{
+  "providers": [
+    {
+      "id": "claude",
+      "name": "Claude Code",
+      "mode": "hot",
+      "modeLabel": "next message",
+      "modeWords": "Open sessions use the new account on their next message.",
+      "store": "~/.claude/.credentials.json",
+      "how": "Switching updates the shared Claude Code login; open sessions notice it on their next request.",
+      "addHint": "The first account is whatever is already signed in.",
+      "installed": true,
+      "sessions": 2,
+      "accounts": [
+        {
+          "name": "work",
+          "active": true,
+          "colour": "#7fa7d9",
+          "plan": "Max",
+          "age": 120,
+          "limits": [
+            {
+              "label": "Session (5-hour)",
+              "percent": 0.34,
+              "resetsInMin": 180
+            },
+            {
+              "label": "Weekly (7-day)",
+              "percent": 0.51,
+              "resetsInMin": 5200
+            }
+          ],
+          "counts": [],
+          "note": ""
+        },
+        {
+          "name": "personal",
+          "active": false,
+          "colour": "#d97757",
+          "plan": "Pro",
+          "age": 900,
+          "limits": [
+            {
+              "label": "Session (5-hour)",
+              "percent": 0.08,
+              "resetsInMin": 240
+            },
+            {
+              "label": "Weekly (7-day)",
+              "percent": 0.19,
+              "resetsInMin": 6100
+            }
+          ],
+          "counts": [],
+          "note": ""
+        },
+        {
+          "name": "side-project",
+          "active": false,
+          "colour": "#8fb572",
+          "plan": "Pro",
+          "age": 1800,
+          "limits": [
+            {
+              "label": "Session (5-hour)",
+              "percent": 0.0,
+              "resetsInMin": 0
+            },
+            {
+              "label": "Weekly (7-day)",
+              "percent": 0.07,
+              "resetsInMin": 8200
+            }
+          ],
+          "counts": [],
+          "note": ""
+        }
+      ],
+      "stats": {
+        "recentDays": [
+          {
+            "date": "2026-09-18",
+            "messageCount": 82,
+            "tokenCount": 410000
+          },
+          {
+            "date": "2026-09-19",
+            "messageCount": 64,
+            "tokenCount": 322000
+          },
+          {
+            "date": "2026-09-20",
+            "messageCount": 12,
+            "tokenCount": 60000
+          },
+          {
+            "date": "2026-09-21",
+            "messageCount": 0
+          },
+          {
+            "date": "2026-09-22",
+            "messageCount": 91,
+            "tokenCount": 455000
+          },
+          {
+            "date": "2026-09-23",
+            "messageCount": 77,
+            "tokenCount": 388000
+          },
+          {
+            "date": "2026-09-24",
+            "messageCount": 40,
+            "tokenCount": 201000
+          }
+        ],
+        "todayTokensByModel": {
+          "claude-sonnet": 180000,
+          "claude-opus": 21000
+        },
+        "modelUsage": {
+          "claude-sonnet": {
+            "inputTokens": 900000,
+            "outputTokens": 300000,
+            "cacheReadInputTokens": 4000000,
+            "cacheCreationInputTokens": 200000
+          },
+          "claude-opus": {
+            "inputTokens": 60000,
+            "outputTokens": 20000,
+            "cacheReadInputTokens": 100000,
+            "cacheCreationInputTokens": 10000
+          }
+        },
+        "todayPrompts": 40,
+        "todaySessions": 5,
+        "totalPrompts": 5200,
+        "totalSessions": 340,
+        "activeDays": 88
+      }
+    },
+    {
+      "id": "codex",
+      "name": "Codex",
+      "mode": "cold",
+      "modeLabel": "new sessions",
+      "modeWords": "Open sessions keep the old account. New sessions use the new one.",
+      "store": "$CODEX_HOME/auth.json",
+      "how": "New Codex sessions use the switched account; sessions already running keep theirs.",
+      "addHint": "The first account is whatever CODEX_HOME is already signed into.",
+      "installed": true,
+      "sessions": 1,
+      "accounts": [
+        {
+          "name": "work",
+          "active": false,
+          "colour": "#7fa7d9",
+          "plan": "Pro",
+          "age": 2400,
+          "limits": [
+            {
+              "label": "5h window",
+              "percent": 0.62,
+              "resetsInMin": 95
+            },
+            {
+              "label": "Weekly",
+              "percent": 0.71,
+              "resetsInMin": 3900
+            }
+          ],
+          "counts": [],
+          "note": ""
+        },
+        {
+          "name": "side-project",
+          "active": true,
+          "colour": "#8fb572",
+          "plan": "Plus",
+          "age": 60,
+          "limits": [
+            {
+              "label": "5h window",
+              "percent": 0.21,
+              "resetsInMin": 210
+            },
+            {
+              "label": "Weekly",
+              "percent": 0.44,
+              "resetsInMin": 5800
+            }
+          ],
+          "counts": [],
+          "note": ""
+        }
+      ],
+      "stats": {
+        "recentDays": [
+          {
+            "date": "2026-09-22",
+            "messageCount": 20
+          },
+          {
+            "date": "2026-09-23",
+            "messageCount": 15
+          },
+          {
+            "date": "2026-09-24",
+            "messageCount": 9
+          }
+        ],
+        "todayPrompts": 9,
+        "todaySessions": 2,
+        "totalPrompts": 640,
+        "totalSessions": 51,
+        "activeDays": 20
+      }
+    },
+    {
+      "id": "copilot",
+      "name": "Copilot",
+      "mode": "cold",
+      "modeLabel": "new sessions",
+      "modeWords": "Open sessions keep the old account. New sessions use the new one.",
+      "store": "gh's per-host auth (github.com)",
+      "how": "Switching runs gh auth switch; new Copilot CLI sessions pick it up, open ones keep their token.",
+      "addHint": "The first account is gh's current active user.",
+      "installed": true,
+      "sessions": 0,
+      "accounts": [
+        {
+          "name": "work",
+          "active": true,
+          "colour": "#d9a54a",
+          "plan": "Business",
+          "age": 300,
+          "limits": [
+            {
+              "label": "Premium requests \u00b7 month",
+              "percent": 0.62,
+              "used": 310,
+              "limit": 500,
+              "unit": "requests",
+              "resetsInMin": 12000
+            }
+          ],
+          "counts": [
+            {
+              "label": "Chat",
+              "value": "unlimited"
+            }
+          ],
+          "note": "gh user octo-work"
+        },
+        {
+          "name": "personal",
+          "active": false,
+          "colour": "#b98fd9",
+          "plan": "Pro",
+          "age": 3600,
+          "limits": [
+            {
+              "label": "Premium requests \u00b7 month",
+              "percent": 0.14,
+              "used": 42,
+              "limit": 300,
+              "unit": "requests",
+              "resetsInMin": 12000
+            }
+          ],
+          "counts": [],
+          "note": "gh user octo-home"
+        }
+      ],
+      "stats": {
+        "recentDays": [
+          {
+            "date": "2026-09-23",
+            "messageCount": 30
+          },
+          {
+            "date": "2026-09-24",
+            "messageCount": 18
+          }
+        ],
+        "todayPrompts": 18,
+        "todaySessions": 3,
+        "totalPrompts": 900,
+        "totalSessions": 70,
+        "activeDays": 40
+      }
+    },
+    {
+      "id": "acme-cli",
+      "name": "Acme CLI",
+      "mode": "hot",
+      "modeLabel": "next message",
+      "modeWords": "Open sessions use the new account on their next message.",
+      "store": "~/.acme/session.json",
+      "how": "A custom provider configured in providers.json.",
+      "addHint": "Sign in with acme first, then run add.",
+      "installed": false,
+      "sessions": 0,
+      "accounts": [
+        {
+          "name": "work",
+          "active": true,
+          "colour": "#b98fd9",
+          "plan": "",
+          "age": 500,
+          "limits": [],
+          "counts": [
+            {
+              "label": "Requests today",
+              "value": 42,
+              "unit": "requests"
+            }
+          ],
+          "note": ""
+        }
+      ],
+      "stats": {
+        "recentDays": [
+          {
+            "date": "2026-09-24",
+            "messageCount": 5
+          }
+        ],
+        "todayPrompts": 5,
+        "todaySessions": 1,
+        "totalPrompts": 120,
+        "totalSessions": 15,
+        "activeDays": 9
+      }
+    }
+  ]
+}
