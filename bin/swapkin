@@ -1,105 +1,53 @@
 #!/usr/bin/env bash
-# Switch the Claude Code account behind one shared ~/.claude.
+# Multi-provider account switcher. The engine (this file) knows accounts,
+# colours, storage layout, demo mode and dispatch; each provider's own
+# behaviour (how a login is stored, how a switch works, how usage is probed)
+# lives in bin/providers/<id>.sh and is sourced in behind a small contract.
 #
-# Settings, sessions, skills, hooks and MCP logins stay where they are. A switch
-# only swaps the Claude login (claudeAiOauth in .credentials.json) and the account
-# profile (oauthAccount in .claude.json). Running sessions notice the new login on
-# their next request, because Claude Code re-reads the file when its mtime changes.
+# Claude keeps its original, unchanged layout ($ACCOUNTS/<name>/, $ACCOUNTS/active)
+# because it is live and cannot be migrated. Every other provider lives under
+# $ACCOUNTS/providers/<id>/.
 set -euo pipefail
 shopt -s nullglob
 umask 077
 
+SCRIPT_DIR="$(cd "$(dirname "$(readlink -f "$0")")" && pwd)"
+PROVIDERS_DIR="$SCRIPT_DIR/providers"
+REPO_ROOT="$(dirname "$SCRIPT_DIR")"
+
 ACCOUNTS="${SWAPKIN_DIR:-${XDG_DATA_HOME:-$HOME/.local/share}/swapkin}"
-CONFIG_DIR="${CLAUDE_CONFIG_DIR:-$HOME/.claude}"
-CREDS="$CONFIG_DIR/.credentials.json"
-# Claude Code keeps .claude.json in $HOME unless CLAUDE_CONFIG_DIR moves it.
-if [[ -n ${CLAUDE_CONFIG_DIR:-} ]]; then STATE="$CONFIG_DIR/.claude.json"; else STATE="$HOME/.claude.json"; fi
 
 die() { echo "swapkin: $*" >&2; exit 1; }
-
-# Hold a window open that the desktop would otherwise close on the spot.
 pause() { [[ -t 0 ]] && read -rsn 1 -p "Press any key to close. " && echo || true; }
 fail() { echo "swapkin: $*" >&2; pause; exit 1; }
 
 # A floating terminal starts from a bare environment, so a CLI installed by a
 # version manager (mise, asdf, nvm, volta) is not on PATH yet. Find it anyway.
-claude_bin() {
-  local candidate
-  if candidate=$(command -v claude 2>/dev/null); then echo "$candidate"; return; fi
-  for candidate in "$HOME/.local/share/mise/shims/claude" "$HOME/.local/bin/claude" \
-                   "$HOME/.claude/local/claude" "$HOME/.asdf/shims/claude" \
-                   "$HOME/.volta/bin/claude" "/usr/local/bin/claude" "/usr/bin/claude"; do
+tool_bin() { # name
+  local name="$1" candidate
+  # L4: name can come from a custom provider's config `command` field. A
+  # value like "x; rm -rf ~" must never reach a shell as unquoted text.
+  [[ $name =~ ^[A-Za-z0-9._-]+$ ]] || return 1
+  if candidate=$(command -v "$name" 2>/dev/null); then echo "$candidate"; return; fi
+  for candidate in "$HOME/.local/share/mise/shims/$name" "$HOME/.local/bin/$name" \
+                   "$HOME/.asdf/shims/$name" "$HOME/.volta/bin/$name" \
+                   "/usr/local/bin/$name" "/usr/bin/$name"; do
     [[ -x $candidate ]] && { echo "$candidate"; return; }
   done
-  # Last resort: a login shell knows what this one does not.
-  candidate=$(bash -lc 'command -v claude' 2>/dev/null || true)
+  candidate=$(bash -lc "command -v $(printf '%q' "$name")" 2>/dev/null || true)
   [[ -n $candidate ]] && echo "$candidate"
-}
-
-active() { cat "$ACCOUNTS/active" 2>/dev/null || true; }
-
-profiles() {
-  for dir in "$ACCOUNTS"/*/; do
-    [[ -f $dir/oauth.json ]] && basename "$dir"
-  done
-}
-
-# Each account carries a colour so it is recognisable at a glance in the bar,
-# in the list and in the Claude Code status line.
-ICONS="$(dirname "$(readlink -f "$0")")/../icons"
-PALETTE=("#7fa7d9" "#d97757" "#8fb572" "#d9a54a" "#b98fd9" "#6fc7c0" "#d98fa8" "#a8a35c" "#7f8fd9" "#c98f6f")
-
-colour_taken() { # colour [account to ignore]
-  local name
-  for name in $(profiles); do
-    [[ $name == "${2:-}" ]] && continue
-    [[ $(colour_of "$name") == "$1" ]] && return 0
-  done
-  return 1
-}
-
-# The palette first; past that, a colour derived from the name, so account
-# eleven still gets its own hue instead of repeating account one's.
-next_colour() {
-  local c
-  for c in "${PALETTE[@]}"; do
-    colour_taken "$c" || { echo "$c"; return; }
-  done
-  derived_colour "${1:-$RANDOM}"
-}
-
-# Name -> hue, at a fixed saturation and lightness that read on a dark bar.
-derived_colour() {
-  local hash hue
-  hash=$(printf '%s' "$1" | cksum | cut -d' ' -f1)
-  hue=$((hash % 360))
-  awk -v h="$hue" 'BEGIN{
-    s=0.42; l=0.66; c=(1-((2*l)-1<0?-((2*l)-1):((2*l)-1)))*s; x=c*(1-(((h/60)%2)-1<0?-(((h/60)%2)-1):(((h/60)%2)-1))); m=l-c/2;
-    if(h<60){r=c;g=x;b=0}else if(h<120){r=x;g=c;b=0}else if(h<180){r=0;g=c;b=x}
-    else if(h<240){r=0;g=x;b=c}else if(h<300){r=x;g=0;b=c}else{r=c;g=0;b=x}
-    printf "#%02x%02x%02x", (r+m)*255, (g+m)*255, (b+m)*255}'
-}
-
-colour_of() {
-  jq -r '.colour // empty' "$ACCOUNTS/$1/meta.json" 2>/dev/null || true
-}
-
-set_colour() { # name colour
-  valid_colour "$2"
-  [[ -d $ACCOUNTS/$1 ]] || die "no account named '$1'"
-  # Two accounts sharing a colour would defeat the point of having one.
-  colour_taken "$2" "$1" && die "another account already uses $2"
-  jq -n --arg c "$2" '{colour: $c}' > "$ACCOUNTS/$1/meta.json.tmp"
-  mv "$ACCOUNTS/$1/meta.json.tmp" "$ACCOUNTS/$1/meta.json"
-}
-
-valid_colour() {
-  [[ $1 =~ ^#[0-9a-fA-F]{6}$ ]] || die "colours look like #7fa7d9"
 }
 
 valid_name() {
   [[ $1 =~ ^[a-z0-9][a-z0-9_-]{0,31}$ ]] || die "account names use a-z, 0-9, - and _ (for example: work, personal)"
+  # 'providers' is reserved (it is the folder every non-Claude provider lives
+  # under); a name starting with '.' is already blocked by the regex above,
+  # since it requires an a-z0-9 first character.
+  [[ $1 == providers ]] && die "'providers' is a reserved name"
+  return 0
 }
+valid_colour() { [[ $1 =~ ^#[0-9a-fA-F]{6}$ ]] || die "colours look like #7fa7d9"; }
+valid_provider_id() { [[ $1 =~ ^[a-z0-9][a-z0-9_-]{0,31}$ ]]; }
 
 # Write through a temp file in the same folder, so the target gets a fresh mtime atomically.
 replace() { # file jq-filter [jq args...]
@@ -110,392 +58,540 @@ replace() { # file jq-filter [jq args...]
   mv "$tmp" "$file"
 }
 
-# What .claude.json keys belong to the account rather than to this machine.
-# They carry the plan: which models it may use, its org defaults, its extra-usage
-# state. Carried across with the login, or a Pro account keeps a Max account's
-# answers until Claude Code refetches them.
-ACCOUNT_KEYS='["oauthAccount","userID","modelAccessCache","orgModelDefaultCache","passesEligibilityCache","additionalModelCostsCache","additionalModelOptionsCache","additionalModelOptionsAnsweredAt","cachedExtraUsageDisabledReason","cachedUsageUtilization","groveConfigCache","penguinModeOrgEnabled","opusProMigrationComplete"]'
-# Per-user experiment flags: never worth carrying, always worth dropping, since
-# Claude Code refetches them for whoever is signed in.
-VOLATILE_KEYS='["cachedStatsigGates","cachedExperimentData","cachedExperimentFeatures","cachedGrowthBookFeatures","cachedGrowthBookFeaturesAt","autoCompactWindowsCache"]'
+# Each account carries a colour so it is recognisable at a glance in the bar
+# and the list. Palette first; past that, a colour derived from the name.
+PALETTE=("#7fa7d9" "#d97757" "#8fb572" "#d9a54a" "#b98fd9" "#6fc7c0" "#d98fa8" "#a8a35c" "#7f8fd9" "#c98f6f")
 
-# Copy a login out of a config dir into a profile.
-store() { # name creds-file state-file
-  local dir="$ACCOUNTS/$1"
-  mkdir -p "$dir"
-  jq -e '.claudeAiOauth.refreshToken' "$2" >/dev/null 2>&1 || die "no Claude login found in $2"
-  jq '.claudeAiOauth' "$2" > "$dir/oauth.json.tmp"
-  jq --argjson keys "$ACCOUNT_KEYS" 'with_entries(select(.key as $k | $keys | index($k)))' "$3" > "$dir/account.json.tmp"
-  mv "$dir/oauth.json.tmp" "$dir/oauth.json"
-  mv "$dir/account.json.tmp" "$dir/account.json"
+derived_colour() { # seed
+  local hash hue
+  hash=$(printf '%s' "$1" | cksum | cut -d' ' -f1)
+  hue=$((hash % 360))
+  awk -v h="$hue" 'BEGIN{
+    s=0.42; l=0.66; c=(1-((2*l)-1<0?-((2*l)-1):((2*l)-1)))*s; x=c*(1-(((h/60)%2)-1<0?-(((h/60)%2)-1):(((h/60)%2)-1))); m=l-c/2;
+    if(h<60){r=c;g=x;b=0}else if(h<120){r=x;g=c;b=0}else if(h<180){r=0;g=c;b=x}
+    else if(h<240){r=0;g=x;b=c}else if(h<300){r=x;g=0;b=c}else{r=c;g=0;b=x}
+    printf "#%02x%02x%02x", (r+m)*255, (g+m)*255, (b+m)*255}'
 }
 
-# Refresh tokens rotate, so the live login goes back to its profile before every switch.
-save() {
-  local name; name=$(active)
-  [[ -n $name ]] || die "no active account yet; run: swapkin add <name>"
-  store "$name" "$CREDS" "$STATE"
+# Where a provider's accounts live. Claude keeps today's layout; everyone else
+# gets a folder under providers/.
+provider_root() { # id
+  [[ $1 == claude ]] && echo "$ACCOUNTS" || echo "$ACCOUNTS/providers/$1"
 }
+provider_active_file() { echo "$(provider_root "$1")/active"; } # id
 
-# A profile has to hold something that can actually be a login. Anything shorter
-# is test data or a half-written file, and switching to it logs the machine out.
-plausible_login() { # account
-  local length
-  length=$(jq -r '(.refreshToken // "") | length' "$ACCOUNTS/$1/oauth.json" 2>/dev/null || echo 0)
-  (( length >= 40 ))
-}
-
-use() {
-  local name="$1"
-  [[ -f $ACCOUNTS/$name/oauth.json ]] || die "no saved login for '$name'"
-  plausible_login "$name" || die "'$name' has no usable login; sign in again with: swapkin add $name"
-  [[ $(active) == "$name" ]] && { echo "Already on $name"; return; }
-  [[ -n $(active) ]] && save
-  replace "$CREDS" '.claudeAiOauth = $o[0]' --slurpfile o "$ACCOUNTS/$name/oauth.json"
-  # Drop the outgoing account's per-user flags, then lay the incoming account's
-  # own keys on top. Everything else in .claude.json — projects, history,
-  # onboarding, this machine's ids — stays exactly as it was.
-  replace "$STATE" 'with_entries(select(.key as $k | $vol | index($k) | not)) * $a[0]' \
-    --argjson vol "$VOLATILE_KEYS" --slurpfile a "$ACCOUNTS/$name/account.json"
-  echo "$name" > "$ACCOUNTS/active"
-  echo "Active: $name"
-}
-
-# The newest throwaway folder that already holds a finished sign-in, if any.
-pending_login() {
-  local newest="" dir
-  for dir in "$ACCOUNTS"/.login.*/; do
-    [[ -f $dir/.credentials.json ]] || continue
-    [[ -z $newest || $dir -nt $newest ]] && newest="$dir"
+eng_profiles() { # id marker
+  local root="$1" dir
+  root=$(provider_root "$1")
+  local marker="$2"
+  for dir in "$root"/*/; do
+    [[ -f $dir/$marker ]] && basename "$dir"
   done
-  [[ -n $newest ]] && echo "${newest%/}"
+}
+
+colour_of_id() { jq -r '.colour // empty' "$(provider_root "$1")/$2/meta.json" 2>/dev/null || true; } # id name
+
+colour_taken_id() { # id marker colour ignore
+  local id="$1" marker="$2" colour="$3" ignore="${4:-}" name
+  for name in $(eng_profiles "$id" "$marker"); do
+    [[ $name == "$ignore" ]] && continue
+    [[ $(colour_of_id "$id" "$name") == "$colour" ]] && return 0
+  done
+  return 1
+}
+
+next_colour_id() { # id marker seed
+  local id="$1" marker="$2" c
+  for c in "${PALETTE[@]}"; do
+    colour_taken_id "$id" "$marker" "$c" || { echo "$c"; return; }
+  done
+  derived_colour "${3:-$RANDOM}"
+}
+
+set_colour_id() { # id marker name colour
+  valid_name "$3"
+  valid_colour "$4"
+  local dir; dir="$(provider_root "$1")/$3"
+  [[ -d $dir ]] || die "no account named '$3'"
+  colour_taken_id "$1" "$2" "$4" "$3" && die "another account already uses $4"
+  jq -n --arg c "$4" '{colour: $c}' > "$dir/meta.json.tmp"
+  mv "$dir/meta.json.tmp" "$dir/meta.json"
+}
+
+# --- convenience wrappers for whichever provider is currently loaded (P_ID/P_MARKER) ---
+profiles() { eng_profiles "$P_ID" "$P_MARKER"; }
+# An adapter may define p_active to work out the active account by asking
+# the tool itself (copilot: gh's real active login) rather than trusting
+# swapkin's own stored pointer, which can drift when the tool is switched
+# by hand (M9). Falls back to the stored pointer when it doesn't.
+active() {
+  if declare -F p_active >/dev/null; then p_active; return; fi
+  cat "$(provider_active_file "$P_ID")" 2>/dev/null || true
+}
+colour_of() { colour_of_id "$P_ID" "$1"; }
+next_colour() { next_colour_id "$P_ID" "$P_MARKER" "${1:-$RANDOM}"; }
+set_colour() { set_colour_id "$P_ID" "$P_MARKER" "$1" "$2"; }
+account_dir() { echo "$(provider_root "$P_ID")/$1"; } # name
+set_active() { echo "$1" > "$(provider_active_file "$P_ID")"; } # name
+
+# --- custom provider config (~/.config/swapkin/providers.json) ---
+custom_config_file() { echo "${XDG_CONFIG_HOME:-$HOME/.config}/swapkin/providers.json"; }
+
+custom_config_safe() {
+  local f; f=$(custom_config_file)
+  [[ -f $f ]] || return 1
+  # -L: follow a symlink (stow-style dotfiles) and check its TARGET's owner
+  # and mode, not the link itself (L8) — otherwise a legitimate symlinked
+  # config is always refused, with the misleading "world-writable" reason.
+  local owner; owner=$(stat -L -c %U "$f" 2>/dev/null) || return 1
+  if [[ $owner != "$(id -un)" ]]; then
+    echo "swapkin: ignoring $f (not owned by you)" >&2
+    return 1
+  fi
+  local perm; perm=$(stat -L -c %a "$f" 2>/dev/null) || return 1
+  if (( (8#$perm) & 8#022 )); then
+    echo "swapkin: ignoring $f (group- or world-writable)" >&2
+    return 1
+  fi
   return 0
 }
 
-# The first account is whoever is signed in now. Later ones sign in inside a
-# throwaway config dir, so the shared ~/.claude is never touched by the login.
-add() {
-  local name="${1:-}"
-  if [[ -z $name ]]; then
-    read -rp "Name for this account (for example work or personal): " name
-  fi
-  valid_name "$name"
-  [[ -f $ACCOUNTS/$name/oauth.json ]] && die "'$name' already exists"
-
-  if [[ -z $(profiles) ]]; then
-    store "$name" "$CREDS" "$STATE"
-    set_colour "$name" "$(next_colour "$name")"
-    echo "$name" > "$ACCOUNTS/active"
-    echo "Saved the current login as '$name'."
-    return
-  fi
-
-  # A sign-in that never reached this script still left its login on disk.
-  # Offer it rather than asking the user to sign in twice.
-  local pending; pending=$(pending_login || true)
-  if [[ -n $pending ]]; then
-    store "$name" "$pending/.credentials.json" "$pending/.claude.json"
-    set_colour "$name" "$(next_colour "$name")"
-    rm -rf "$pending"
-    echo "Recovered the sign-in you already finished and saved it as '$name'."
-    return
-  fi
-
-  # The trap fires after this function returns, so the folder it cleans up has
-  # to outlive the local scope.
-  LOGIN_DIR=$(mktemp -d "$ACCOUNTS/.login.XXXXXX")
-  trap 'rm -rf "${LOGIN_DIR:-}"' EXIT
-  local login="$LOGIN_DIR"
-  # Carry the theme across so the throwaway session looks like the usual one.
-  # Nothing about onboarding or login is copied: the sign-in flow must run intact.
-  jq '{theme} | with_entries(select(.value != null))' "$STATE" > "$login/.claude.json"
-  cat <<EOF
-Claude Code opens in a throwaway config folder. Sign in with:
-
-  /login
-
-That is the whole job. This window closes by itself once the account is saved.
-Your usual config, your sessions and your open Claude Code windows are untouched.
-
-EOF
-
-  local cli; cli=$(claude_bin)
-  [[ -n $cli ]] || fail "cannot find the claude command. Open a terminal where 'claude' works and run: swapkin add $name"
-
-  # Watch for the sign-in instead of asking the user to quit Claude Code: the
-  # credentials file appears the moment /login succeeds. Saving it right then
-  # also beats the throwaway session to its first token refresh, which would
-  # rotate the token this profile just stored.
-  CLAUDE_CONFIG_DIR="$login" "$cli" &
-  local claude_pid=$!
-  local waited=0
-  while (( waited < 900 )); do
-    if [[ -f $login/.credentials.json ]] && jq -e '.claudeAiOauth.refreshToken' "$login/.credentials.json" >/dev/null 2>&1; then
-      sleep 1   # let Claude Code finish writing the account profile too
-      store "$name" "$login/.credentials.json" "$login/.claude.json"
-      set_colour "$name" "$(next_colour "$name")"
-      kill "$claude_pid" 2>/dev/null || true
-      wait "$claude_pid" 2>/dev/null || true
-      echo
-      echo "Saved '$name'. Pick it from the bar, or run: swapkin use $name"
-      sleep 2
-      return
-    fi
-    kill -0 "$claude_pid" 2>/dev/null || break
-    sleep 1
-    waited=$((waited + 1))
-  done
-
-  wait "$claude_pid" 2>/dev/null || true
-  fail "no sign-in found, so nothing was saved. Run /login inside Claude Code."
+custom_ids() {
+  custom_config_safe || return 0
+  jq -r '.providers[]?.id // empty' "$(custom_config_file)" 2>/dev/null
 }
 
-remove() {
-  local name="$1"
-  [[ -d $ACCOUNTS/$name ]] || die "no account named '$name'"
+custom_entry() { # id
+  custom_config_safe || return 0
+  # L3: a config with a duplicated id must yield exactly one entry (the
+  # first), not one per match glued together into invalid JSON.
+  jq -c --arg id "$1" '[.providers[]? | select(.id==$id)][0] // empty' "$(custom_config_file)" 2>/dev/null
+}
+
+BUILTIN_IDS=(claude codex copilot)
+
+all_provider_ids() {
+  local id seen=()
+  printf '%s\n' "${BUILTIN_IDS[@]}"
+  for id in $(custom_ids); do
+    valid_provider_id "$id" || continue
+    if [[ " ${BUILTIN_IDS[*]} " == *" $id "* ]]; then
+      echo "swapkin: ignoring custom provider '$id' (clashes with a built-in)" >&2
+      continue
+    fi
+    # L3: a duplicated id in the config is listed once (the first wins).
+    if [[ " ${seen[*]} " == *" $id "* ]]; then
+      echo "swapkin: ignoring duplicate custom provider id '$id'" >&2
+      continue
+    fi
+    seen+=("$id")
+    echo "$id"
+  done
+}
+
+# --- load one provider's adapter into this process (contract functions p_*) ---
+load_adapter() { # id
+  local id="$1"
+  case "$id" in
+    claude|codex|copilot)
+      # shellcheck source=/dev/null
+      source "$PROVIDERS_DIR/$id.sh"
+      ;;
+    *)
+      valid_provider_id "$id" || return 1
+      local entry; entry=$(custom_entry "$id")
+      [[ -n $entry ]] || return 1
+      _CUSTOM_ENTRY="$entry"
+      P_ID="$id"
+      P_NAME=$(jq -r '.name // .id' <<<"$entry")
+      P_MODE=$(jq -r '.mode' <<<"$entry")
+      P_CMD=$(jq -r '.command' <<<"$entry")
+      P_MARKER="custom.json"
+      P_STORE=$(jq -r 'if .mode=="hot" then (.loginFiles // [] | join(", ")) else (.homeEnv // "") end' <<<"$entry")
+      P_HOMEVAR=$(jq -r 'if .mode=="cold" then (.homeEnv // "") else "" end' <<<"$entry")
+      # L1: homeEnv reaches `export $HOMEVAR=...` inside `eval "$(swapkin env)"`
+      # in every shell rc, so a bad value is a shell injection, not just a
+      # bad variable name. Require a normal env-var name and refuse the ones
+      # that would change how every later command in that shell runs.
+      if [[ -n $P_HOMEVAR ]]; then
+        if [[ ! $P_HOMEVAR =~ ^[A-Z_][A-Z0-9_]*$ ]] || [[ $P_HOMEVAR =~ ^(PATH|LD_PRELOAD|LD_LIBRARY_PATH|BASH_ENV|IFS|ENV|SHELL)$ ]]; then
+          echo "swapkin: ignoring custom provider '$id' (unsafe homeEnv '$P_HOMEVAR')" >&2
+          return 1
+        fi
+      fi
+      P_HOW="Configured in providers.json."
+      P_ADD_HINT="Run add, then sign in with $P_CMD when it asks."
+      # shellcheck source=/dev/null
+      source "$PROVIDERS_DIR/custom.sh"
+      ;;
+  esac
+}
+
+# --- demo mode: serve everything from demo/providers.json, touch nothing real ---
+demo_flag_file() { echo "${XDG_CONFIG_HOME:-$HOME/.config}/swapkin/demo"; }
+demo_active() {
+  [[ ${SWAPKIN_DEMO:-0} == 1 ]] && return 0
+  [[ -f "$(demo_flag_file)" ]]
+}
+demo_file() { echo "${SWAPKIN_DEMO_FILE:-$REPO_ROOT/demo/providers.json}"; }
+
+demo_providers_json() {
+  local f; f=$(demo_file)
+  [[ -f $f ]] || { echo '{"demo":true,"providers":[]}'; return; }
+  jq --argjson now "$(date -u +%s)" '
+    def toIso(mins): ($now + (mins*60)) | todate;
+    .demo = true
+    | .providers |= map(.accounts |= map(
+        .limits |= (map(if has("resetsInMin") then (.resetsAt = toIso(.resetsInMin) | del(.resetsInMin)) else . end))
+      ))
+  ' "$f"
+}
+
+demo_list_json() { # provider id
+  demo_providers_json | jq -c --arg id "$1" '(.providers[] | select(.id==$id) | .accounts) // []'
+}
+
+# The demo provider's active account, as name/plan/colour (each empty if none).
+demo_active_account() { # id
+  demo_providers_json | jq -r --arg id "$1" \
+    '(.providers[] | select(.id==$id) | .accounts[] | select(.active)) as $a
+     | [$a.name // "", $a.plan // "", $a.colour // ""] | @tsv'
+}
+
+demo_status() { # provider id
+  local name plan colour; IFS=$'\t' read -r name plan colour < <(demo_active_account "$1")
+  [[ -n $name ]] || { echo "No accounts yet. Run: swapkin add <name>"; return; }
+  printf '%s · %s\n' "$name" "${plan:-?}"
+}
+
+demo_statusline() { # provider id, --plain
+  local name plan colour; IFS=$'\t' read -r name plan colour < <(demo_active_account "$1")
+  [[ -n $name ]] || return 0
+  colour="${colour:-#d97757}"
+  if [[ "${2:-}" == --plain ]]; then printf '@%s' "$name"; return; fi
+  printf '\033[38;2;%d;%d;%dm@%s\033[0m' "$((16#${colour:1:2}))" "$((16#${colour:3:2}))" "$((16#${colour:5:2}))" "$name"
+}
+
+demo_cost() { echo '{"today":null}'; }
+
+# --- generic account commands, shared by every provider ---
+# M5: is any running process holding this cold home open right now (its
+# HOMEVAR=value entry in /proc/PID/environ)? Unreadable environ files (a
+# process we don't own) are skipped, not treated as a match or an error.
+home_in_use() { # var value
+  local var="$1" value="$2" f
+  for f in /proc/[0-9]*/environ; do
+    [[ -r $f ]] || continue
+    tr '\0' '\n' < "$f" 2>/dev/null | grep -qxF "$var=$value" && return 0
+  done
+  return 1
+}
+
+cmd_remove() { # name
+  local name="$1" dir
+  valid_name "$name"
+  dir=$(account_dir "$name")
+  [[ -d $dir ]] || die "no account named '$name'"
   [[ $(active) == "$name" ]] && die "'$name' is active; switch to another account first"
-  rm -rf "${ACCOUNTS:?}/$name"
+  if [[ $P_MODE == cold ]] && declare -F home_of >/dev/null && [[ -n ${P_HOMEVAR:-} ]]; then
+    local home; home=$(home_of "$name")
+    if [[ -n $home ]] && home_in_use "$P_HOMEVAR" "$home"; then
+      die "'$name' is in use by a running $P_NAME session; close those sessions first"
+    fi
+  fi
+  rm -rf "${dir:?}"
   echo "Removed '$name'."
 }
 
-# Probe each account's limits with Omarchy's collector, pointed at a shadow config
-# dir holding only that login and a cache of its own, so accounts never mix.
-# Keeps the last good result: the collector never refreshes an expired token.
-usage() {
-  # Refresh the active profile from the live login first, under the lock, so a
-  # probe that lands mid-switch cannot file one account's figures under another.
-  if [[ -n $(active) ]]; then
-    (
-      exec 9>"$ACCOUNTS/.lock"
-      flock -w 5 9 || exit 0
-      save
-    ) || true
+acct_plan() { # name
+  declare -F p_plan >/dev/null && p_plan "$1" 2>/dev/null || true
+}
+
+# An account's cached usage.json (or {}) and its age in seconds (or -1 if
+# absent). A malformed or non-object usage.json (a bad provider probe, a
+# half-written file) becomes {} here instead of reaching jq downstream, so
+# `providers --json` / `list --json` always emit valid JSON.
+usage_of() { # dir
+  local dir="$1" raw
+  if [[ -f $dir/usage.json ]]; then
+    raw=$(jq -ce 'if type == "object" then . else empty end' "$dir/usage.json" 2>/dev/null) || raw='{}'
+    printf '%s\n%s\n' "$raw" "$(( $(date +%s) - $(stat -c %Y "$dir/usage.json") ))"
+  else
+    printf '%s\n%s\n' '{}' -1
   fi
+}
+
+cmd_list() { # --json or empty
+  local cur; cur=$(active)
+  if [[ "${1:-}" == --json ]]; then
+    local name rows=()
+    for name in $(profiles); do
+      local dir; dir=$(account_dir "$name")
+      local usage age; { read -r usage; read -r age; } < <(usage_of "$dir")
+      rows+=("$(jq -c -n --arg name "$name" --arg cur "$cur" --arg colour "$(colour_of "$name")" \
+        --arg plan "$(acct_plan "$name")" --argjson age "$age" --argjson usage "$usage" \
+        '{name: $name, plan: $plan, active: ($name == $cur), colour: $colour, age: $age}
+         + $usage
+         + {weekly: (($usage.limits // []) | map(select((.label // "") | ascii_downcase | test("week")))[0].percent // null)}')")
+    done
+    if (( ${#rows[@]} == 0 )); then echo '[]'; else printf '%s\n' "${rows[@]}" | jq -sc .; fi
+    return
+  fi
+  for name in $(profiles); do
+    local plan; plan=$(acct_plan "$name")
+    printf '%s %s · %s\n' "$([[ $name == "$cur" ]] && echo '*' || echo ' ')" "$name" "${plan:-?}"
+  done
+}
+
+# One provider's full entry for `providers --json`. Runs in a subshell so the
+# adapter it sources cannot leak functions/vars into a sibling provider's turn.
+provider_entry_json() { # id
+  local id="$1"
+  (
+    load_adapter "$id" || exit 0
+    local installed=false
+    if declare -F p_installed >/dev/null && p_installed 2>/dev/null; then installed=true; fi
+    local has_accounts=""
+    has_accounts=$(profiles | head -1)
+    [[ $installed == true || -n $has_accounts ]] || exit 0
+
+    local sessions=0
+    declare -F p_sessions >/dev/null && sessions=$(p_sessions 2>/dev/null || echo 0)
+    [[ $sessions =~ ^[0-9]+$ ]] || sessions=0
+
+    local mode_label mode_words
+    case "$P_MODE" in
+      hot) mode_label="next message"; mode_words="Open sessions use the new account on their next message." ;;
+      cold) mode_label="new sessions"; mode_words="Open sessions keep the old account. New sessions use the new one." ;;
+      *) mode_label="re-login"; mode_words="The tool keeps one login. Switching means signing in again." ;;
+    esac
+
+    local cur name accounts
+    cur=$(active)
+    accounts="[]"
+    for name in $(profiles); do
+      local dir; dir=$(account_dir "$name")
+      local usage age; { read -r usage; read -r age; } < <(usage_of "$dir")
+      accounts=$(jq -c -n --argjson accs "$accounts" --arg name "$name" --arg cur "$cur" \
+        --arg colour "$(colour_of "$name")" --arg plan "$(acct_plan "$name")" --argjson age "$age" --argjson usage "$usage" \
+        '$accs + [{name:$name, active: ($name == $cur), colour: $colour, plan: $plan, age: $age,
+                    limits: (($usage.limits) // []), counts: (($usage.counts) // []), note: (($usage.note) // ""),
+                    tierLabel: (($usage.tierLabel) // ""), updatedAt: (($usage.updatedAt) // "")}
+                   + {weekly: ((($usage.limits) // []) | map(select((.label // "") | ascii_downcase | test("week")))[0].percent // null)}]')
+    done
+
+    jq -n --arg id "$P_ID" --arg name "$P_NAME" --arg mode "$P_MODE" --arg modeLabel "$mode_label" \
+      --arg modeWords "$mode_words" --arg store "$P_STORE" --arg how "$P_HOW" --arg addHint "$P_ADD_HINT" \
+      --argjson installed "$installed" --argjson sessions "$sessions" --argjson accounts "$accounts" \
+      '{id:$id, name:$name, mode:$mode, modeLabel:$modeLabel, modeWords:$modeWords, store:$store, how:$how,
+        addHint:$addHint, installed:$installed, sessions:$sessions, accounts:$accounts}'
+  )
+}
+
+cmd_providers_json() {
+  local id entries=()
+  for id in $(all_provider_ids); do
+    local e; e=$(provider_entry_json "$id")
+    [[ -n $e ]] && entries+=("$e")
+  done
+  if (( ${#entries[@]} == 0 )); then
+    echo '{"demo":false,"providers":[]}'
+  else
+    printf '%s\n' "${entries[@]}" | jq -sc '{demo:false, providers:.}'
+  fi
+}
+
+cmd_usage() { # single provider, adapter already loaded
+  if [[ $P_MODE == hot ]] && declare -F p_save >/dev/null && [[ -n $(active) ]]; then
+    ( exec 9>"$ACCOUNTS/.lock"; flock -w 5 9 || exit 0; p_save ) || true
+  fi
+  declare -F p_probe >/dev/null || return 0
   local name
   for name in $(profiles); do
-    probe_one "$name" &
+    p_probe "$name" &
   done
   wait
 }
 
-CONFIG="$ACCOUNTS/config.json"
-STATE_FILE="$ACCOUNTS/watch.json"
-
-setting() { # key default
-  jq -r --arg k "$1" --arg d "$2" '.[$k] // $d' "$CONFIG" 2>/dev/null || echo "$2"
-}
-
-# Same two-circle mark the panel draws for this account: a solid disc in its
-# colour overlapped by an outline ring. One icon per palette colour ships with
-# the plugin, so nothing is written to disk to show a notification. A colour
-# outside the palette gets the neutral mark.
-icon_for() { # account
-  local colour="" c
-  [[ ${1:-} =~ ^[a-z0-9][a-z0-9_-]{0,31}$ ]] && colour=$(colour_of "$1")
-  colour=${colour,,}
-  for c in "${PALETTE[@]}"; do
-    [[ $c == "$colour" ]] && { echo "$ICONS/account-${c#\#}.svg"; return; }
+cmd_usage_all() {
+  local self id
+  self="$(readlink -f "$0")"
+  for id in $(all_provider_ids); do
+    ( "$self" -p "$id" usage ) &
   done
-  echo "$ICONS/account-default.svg"
+  wait
 }
 
-notify() { # title body account
-  command -v notify-send >/dev/null || return 0
-  notify-send --app-name=Swapkin --icon="$(icon_for "${3:-}")" "$1" "$2" || true
-}
-
-weekly_of() { # account
-  jq -r '[.limits[]? | select((.label // "") | ascii_downcase | test("week"))][0].percent // -1' \
-    "$ACCOUNTS/$1/usage.json" 2>/dev/null || echo -1
-}
-
-# The account with the most room left, ignoring the one passed in.
-roomiest() { # account to ignore
-  local best="" best_pct=2 name pct
-  for name in $(profiles); do
-    [[ $name == "$1" ]] && continue
-    pct=$(weekly_of "$name")
-    awk -v p="$pct" 'BEGIN{exit !(p >= 0)}' || continue
-    if awk -v p="$pct" -v b="$best_pct" 'BEGIN{exit !(p < b)}'; then
-      best="$name"
-      best_pct="$pct"
-    fi
+cmd_env() { # [id]
+  local id="${1:-}"
+  if [[ -n $id ]]; then
+    load_adapter "$id" || die "unknown provider '$id'"
+    _print_env_for_active
+    return
+  fi
+  local self pid
+  self="$(readlink -f "$0")"
+  for pid in $(all_provider_ids); do
+    ( "$self" -p "$pid" env "$pid" 2>/dev/null ) || true
   done
-  echo "$best"
 }
 
-# One pass of the watchdog: refresh the figures, warn once per threshold, and
-# hand over to another account when this one is spent.
-check() {
-  usage
-  local cur; cur=$(active)
-  [[ -n $cur ]] || return 0
-  local pct; pct=$(weekly_of "$cur")
-  awk -v p="$pct" 'BEGIN{exit !(p >= 0)}' || return 0
-
-  local warn_at; warn_at=$(setting alertAt 90)
-  # Off by default: taking over an account is the user's call, not the plugin's.
-  local auto_switch; auto_switch=$(setting autoSwitch false)
-  # Date only: the API restamps this to the current instant on every fetch,
-  # so keying on the full value would treat each check() run as a new window
-  # and re-notify every time instead of once per real reset.
-  local reset; reset=$(jq -r '[.limits[]? | select((.label // "") | ascii_downcase | test("week"))][0].resetsAt // ""' "$ACCOUNTS/$cur/usage.json" 2>/dev/null | cut -c1-10)
-  local last; last=$(jq -r --arg a "$cur" --arg r "$reset" '.[$a][$r] // 0' "$STATE_FILE" 2>/dev/null || echo 0)
-  local stage=0
-  awk -v p="$pct" -v w="$warn_at" 'BEGIN{exit !(p * 100 >= w)}' && stage=1
-  awk -v p="$pct" 'BEGIN{exit !(p >= 1)}' && stage=2
-  (( stage > last )) || return 0
-
-  local other; other=$(roomiest "$cur")
-  # Never hand over to an account that cannot be verified: a real login, and
-  # figures fresh enough to trust.
-  if [[ -n $other ]]; then
-    local age=$(( $(date +%s) - $(stat -c %Y "$ACCOUNTS/$other/usage.json" 2>/dev/null || echo 0) ))
-    if ! plausible_login "$other" || (( age > 7200 )); then other=""; fi
-  fi
-  if (( stage == 2 )) && [[ $auto_switch == true && -n $other ]]; then
-    use "$other" >/dev/null
-    notify "Switched to $other" "$cur ran out of weekly quota. Open sessions follow on their next message." "$other"
-  elif (( stage >= 1 )); then
-    local pretty; pretty=$(awk -v p="$pct" 'BEGIN{printf "%d", p * 100}')
-    if [[ -n $other ]]; then
-      local free; free=$(awk -v p="$(weekly_of "$other")" 'BEGIN{printf "%d", (1 - p) * 100}')
-      notify "$cur is at ${pretty}% of its week" "$other has ${free}% free. Switch from the bar, or press a in the panel." "$cur"
-    else
-      notify "$cur is at ${pretty}% of its week" "No other account has room right now." "$cur"
-    fi
-  fi
-
-  local tmp; tmp=$(mktemp "$STATE_FILE.XXXXXX")
-  jq -n --arg a "$cur" --arg r "$reset" --argjson s "$stage" --slurpfile old <(cat "$STATE_FILE" 2>/dev/null || echo '{}') \
-    '($old[0] // {}) * {($a): {($r): $s}}' > "$tmp"
-  mv "$tmp" "$STATE_FILE"
-}
-
-RECORD="${XDG_STATE_HOME:-$HOME/.local/state}/omarchy/agents/usage/claude.json"
-PRICES="$(dirname "$(readlink -f "$0")")/../prices.json"
-
-# What today's tokens would have cost on the API. The collector reports today's
-# tokens per model but not how they split between input, output and cache, so the
-# split is taken from that model's all-time mix. An estimate, and labelled as one.
-cost() {
-  [[ -f $RECORD && -f $PRICES ]] || { echo '{"today":null}'; return; }
-  jq -c --slurpfile prices "$PRICES" '
-    ($prices[0].models // {}) as $rates
-    | def rate($model): ($rates | to_entries | map(select(.key as $k | $model | startswith($k)))[0].value // null);
-      (.modelUsage // {}) as $mix
-    | [ (.todayTokensByModel // {}) | to_entries[]
-        | . as $day
-        | (rate($day.key)) as $r
-        | ($mix[$day.key] // {}) as $m
-        | (($m.inputTokens // 0) + ($m.outputTokens // 0)
-           + ($m.cacheReadInputTokens // 0) + ($m.cacheCreationInputTokens // 0)) as $total
-        | select($r != null and $total > 0)
-        | ($day.value / $total) as $scale
-        | ((($m.inputTokens // 0) * $scale * $r.input
-            + ($m.outputTokens // 0) * $scale * $r.output
-            + ($m.cacheReadInputTokens // 0) * $scale * $r.cacheRead
-            + ($m.cacheCreationInputTokens // 0) * $scale * $r.cacheWrite) / 1000000) ]
-      | add // 0
-      | { today: (. * 100 | round / 100) }' "$RECORD"
-}
-
-# A ready-made segment for Claude Code's status line: the active account in its
-# own colour. Print it from your status line command.
-statusline() {
+_print_env_for_active() {
+  [[ $P_MODE == cold ]] || return 0
+  declare -F p_env >/dev/null || return 0
   local name; name=$(active)
   [[ -n $name ]] || return 0
-  local colour; colour=$(colour_of "$name")
-  [[ $colour =~ ^#[0-9a-fA-F]{6}$ ]] || colour="#d97757"
-  if [[ ${1:-} == --plain ]]; then
-    printf '@%s' "$name"
-    return
+  local k v
+  while IFS='=' read -r k v; do
+    [[ -n $k ]] && printf 'export %s=%q\n' "$k" "$v"
+  done < <(p_env "$name")
+}
+
+cmd_run() { # id [args...]
+  local id="$1"; shift || true
+  load_adapter "$id" || die "unknown provider '$id'"
+  local cli; cli=$(tool_bin "$P_CMD")
+  [[ -n $cli ]] || die "cannot find the $P_CMD command"
+  if [[ $P_MODE == cold ]] && declare -F p_env >/dev/null; then
+    local name k v; name=$(active)
+    if [[ -n $name ]]; then
+      while IFS='=' read -r k v; do
+        [[ -n $k ]] && export "$k=$v"
+      done < <(p_env "$name")
+    fi
   fi
-  printf '\033[38;2;%d;%d;%dm@%s\033[0m' \
-    "$((16#${colour:1:2}))" "$((16#${colour:3:2}))" "$((16#${colour:5:2}))" "$name"
-}
-
-# One account's limits, from its own saved login and its own cache, so several
-# accounts can be probed at once without mixing anything up.
-probe_one() { # account
-  local dir="$ACCOUNTS/$1"
-  mkdir -p "$dir/shadow" "$dir/cache"
-  jq '{claudeAiOauth: .}' "$dir/oauth.json" > "$dir/shadow/.credentials.json"
-  local record
-  record=$(CLAUDE_CONFIG_DIR="$dir/shadow" XDG_CACHE_HOME="$dir/cache" \
-    timeout 20 omarchy-agent-usage-claude --limits-only --force 2>/dev/null) || return 0
-  jq -e '(.limits // []) | length > 0' >/dev/null 2>&1 <<<"$record" || return 0
-  jq -c '{limits, tierLabel, updatedAt}' <<<"$record" > "$dir/usage.json.tmp"
-  mv "$dir/usage.json.tmp" "$dir/usage.json"
-}
-
-status() {
-  local name; name=$(active)
-  [[ -n $name ]] || { echo "No accounts yet. Run: swapkin add <name>"; return; }
-  printf '%s · %s\n' "$name" "$(jq -r '.claudeAiOauth.subscriptionType // "?"' "$CREDS")"
-}
-
-list() {
-  local cur; cur=$(active)
-  if [[ ${1:-} == --json ]]; then
-    for name in $(profiles); do
-      local dir="$ACCOUNTS/$name" usage='{}'
-      [[ -f $dir/usage.json ]] && usage=$(cat "$dir/usage.json")
-      local age=-1
-      [[ -f $dir/usage.json ]] && age=$(( $(date +%s) - $(stat -c %Y "$dir/usage.json") ))
-      jq -c --arg name "$name" --arg cur "$cur" --arg colour "$(colour_of "$name")" \
-        --argjson age "$age" --argjson usage "$usage" \
-        '{name: $name, plan: (.subscriptionType // ""), active: ($name == $cur), colour: $colour, age: $age}
-         + $usage
-         + {weekly: (($usage.limits // []) | map(select(.label // "" | ascii_downcase | test("week")))[0].percent // null)}' "$dir/oauth.json"
-    done | jq -sc .
-    return
-  fi
-  for name in $(profiles); do
-    printf '%s %s · %s\n' "$([[ $name == "$cur" ]] && echo '*' || echo ' ')" "$name" \
-      "$(jq -r '.subscriptionType // "?"' "$ACCOUNTS/$name/oauth.json")"
-  done
+  exec "$cli" "$@"
 }
 
 help() {
   cat <<'EOF'
-Usage: swapkin <command>
+Usage: swapkin [-p|--provider ID] <command>
 
   status          Show the active account
   list [--json]   List saved accounts (* marks the active one)
   add [name]      Save a new account (the first one is your current login)
   colour <name> <#rrggbb>
                   Set the colour that marks this account
-  use <name>      Switch every Claude Code session to <name>
+  use <name>      Switch every session for this provider to <name>
   remove <name>   Forget a saved account
-  save            Store the live login back into the active account
-  usage           Refresh each account's rate limits for the bar panel
-  check           One watchdog pass: refresh, warn, and hand over when spent
+  save            Store the live login back into the active account (hot only)
+  usage           Refresh rate limits; with no -p, probes every provider
+  check           One watchdog pass for Claude: refresh, warn, hand over when spent
   cost            Today's tokens priced at API rates (an estimate, as JSON)
-  statusline      The active account, coloured, for a Claude Code status line
+  statusline      The active account, coloured, for a status line
+  providers --json
+                  Every provider, installed or with saved accounts, as JSON
+  env [id]        export KEY=value lines for a cold provider's active account
+  run <id> [-- args]
+                  Exec that provider's CLI with its active account's env
+  demo on|off     Toggle demo mode (serves invented data, changes nothing real)
+
+Provider: -p/--provider ID or SWAPKIN_PROVIDER (default: claude)
 EOF
 }
 
 mkdir -p "$ACCOUNTS"
 
-case "${1:-status}" in
+# --- parse -p/--provider, but only as a LEADING option before the subcommand ---
+# Once the subcommand word (or `--`) is reached, everything after it is the
+# child command's own arguments and must pass through untouched — otherwise
+# `swapkin run codex -- -p myprofile exec hi` would swallow Codex's own -p.
+explicit_provider=0
+provider="${SWAPKIN_PROVIDER:-claude}"
+[[ -n ${SWAPKIN_PROVIDER:-} ]] && explicit_provider=1
+args=()
+while (( $# )); do
+  case "$1" in
+    -p|--provider) provider="${2:?usage: -p <provider>}"; explicit_provider=1; shift 2 ;;
+    --provider=*) provider="${1#--provider=}"; explicit_provider=1; shift ;;
+    --) args+=("$@"); break ;;
+    *) args+=("$@"); break ;;
+  esac
+done
+if (( ${#args[@]} )); then set -- "${args[@]}"; else set -- status; fi
+cmd="${1:-status}"
+
+# --- demo mode: read commands answer from demo data, write/network commands no-op ---
+if demo_active; then
+  case "$cmd" in
+    providers)
+      [[ ${2:-} == --json ]] && { demo_providers_json; exit 0; } ;;
+    list)
+      if [[ ${2:-} == --json ]]; then demo_list_json "$provider"; else
+        demo_list_json "$provider" | jq -r '.[] | ([.name," ","·",.plan] | join(" "))'
+      fi
+      exit 0 ;;
+    status) demo_status "$provider"; exit 0 ;;
+    statusline) demo_statusline "$provider" "${2:-}"; exit 0 ;;
+    cost) demo_cost; exit 0 ;;
+    use|save|add|remove|colour|color|usage|check|env|run)
+      # stderr, not stdout: `env`'s output is meant for `eval "$(swapkin env)"`
+      # in a shell rc, and this message would otherwise break that eval (L7).
+      echo "swapkin: demo mode, nothing changed" >&2
+      exit 0 ;;
+  esac
+fi
+
+case "$cmd" in
   use|save|add|remove|colour|color)
-    # Anything that touches logins takes the lock; probing usage does not.
+    load_adapter "$provider" || die "unknown provider '$provider'"
+    mkdir -p "$(provider_root "$P_ID")"
     exec 9>"$ACCOUNTS/.lock"
     flock -w 10 9 || die "another switch is still running"
-    case $1 in
-      use) use "${2:?usage: swapkin use <name>}" ;;
-      add) add "${2:-}" ;;
+    case "$cmd" in
+      use) valid_name "${2:?usage: swapkin use <name>}"; declare -F p_use >/dev/null || die "use is not supported for $provider"
+           # A provider can set P_ALWAYS_SWITCH=1 to skip the "already on"
+           # short-circuit: copilot's use must always run gh auth switch
+           # (idempotent), since the stored pointer can disagree with gh's
+           # real active login (M9).
+           if [[ ${P_ALWAYS_SWITCH:-0} != 1 && $(active) == "$2" ]]; then echo "Already on $2"; else p_use "$2"; fi ;;
+      add) declare -F p_add >/dev/null || die "add is not supported for $provider"; p_add "${2:-}" "${3:-}" ;;
       colour|color) set_colour "${2:?usage: swapkin colour <name> <#rrggbb>}" "${3:?usage: swapkin colour <name> <#rrggbb>}" ;;
-      remove) remove "${2:?usage: swapkin remove <name>}" ;;
-      save) save ;;
+      remove) cmd_remove "${2:?usage: swapkin remove <name>}" ;;
+      save) declare -F p_save >/dev/null && p_save || die "save is not supported for $provider" ;;
     esac ;;
-  status) status ;;
-  list) list "${2:-}" ;;
-  usage) usage ;;
-  check) check ;;
-  cost) cost ;;
-  statusline) statusline "${2:-}" ;;
+  status)
+    load_adapter "$provider" || die "unknown provider '$provider'"
+    if declare -F p_status >/dev/null; then p_status; else
+      name=$(active)
+      [[ -n $name ]] || { echo "No accounts yet. Run: swapkin add <name>"; exit 0; }
+      printf '%s · %s\n' "$name" "$(acct_plan "$name")"
+    fi ;;
+  list)
+    load_adapter "$provider" || die "unknown provider '$provider'"
+    cmd_list "${2:-}" ;;
+  usage)
+    if (( ! explicit_provider )); then
+      cmd_usage_all
+    else
+      load_adapter "$provider" || die "unknown provider '$provider'"
+      mkdir -p "$(provider_root "$P_ID")"
+      cmd_usage
+    fi ;;
+  check)
+    load_adapter claude
+    claude_check ;;
+  cost)
+    load_adapter "$provider" || die "unknown provider '$provider'"
+    if declare -F p_cost >/dev/null; then p_cost; else echo '{"today":null}'; fi ;;
+  statusline)
+    load_adapter "$provider" || die "unknown provider '$provider'"
+    declare -F p_statusline >/dev/null && p_statusline "${2:-}" ;;
+  providers)
+    [[ ${2:-} == --json ]] || { help >&2; exit 2; }
+    cmd_providers_json ;;
+  env) cmd_env "${2:-}" ;;
+  run)
+    shift || true
+    run_id="${1:?usage: swapkin run <id> [-- args]}"; shift || true
+    [[ ${1:-} == -- ]] && shift
+    cmd_run "$run_id" "$@" ;;
+  demo)
+    case "${2:-}" in
+      on) mkdir -p "$(dirname "$(demo_flag_file)")"; touch "$(demo_flag_file)"; echo "Demo mode on." ;;
+      off) rm -f "$(demo_flag_file)"; echo "Demo mode off." ;;
+      *) die "usage: swapkin demo on|off" ;;
+    esac ;;
   -h|--help|help) help ;;
   *) help >&2; exit 2 ;;
 esac
