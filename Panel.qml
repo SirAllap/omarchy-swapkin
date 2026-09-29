@@ -257,26 +257,65 @@ Panel {
     return peak
   }
 
+  // Grouped by family: "Opus" once, with its versions (5, 5.5) listed under it,
+  // so a new point release does not look like a different model. A family's
+  // header carries the sum; the bars under it compare versions on one scale.
   function modelRows(p) {
     var usageByModel = p ? (p.modelUsage || {}) : {}
-    var rows = []
+    var families = {}
     for (var id in usageByModel) {
       var bucket = usageByModel[id] || {}
       var input = Number(bucket.inputTokens || 0)
       var output = Number(bucket.outputTokens || 0)
       var cacheRead = Number(bucket.cacheReadInputTokens || 0)
       var cacheWrite = Number(bucket.cacheCreationInputTokens || 0)
-      rows.push({
-        name: usage.friendlyModelName(id),
-        total: input + output + cacheRead + cacheWrite,
-        input: input,
-        output: output,
-        cacheRead: cacheRead,
-        cacheWrite: cacheWrite
+      var name = usage.friendlyModelName(id)
+      var parts = name.match(/^(\D*?)\s*([vV]?\d.*)?$/)
+      var family = parts && parts[1] ? parts[1] : name
+      var version = parts && parts[1] && parts[2] ? parts[2] : ""
+      var fam = families[family] || (families[family] = {
+        name: family, total: 0, input: 0, output: 0, cacheRead: 0, cacheWrite: 0, versions: {}
       })
+      var v = fam.versions[version] || (fam.versions[version] = {
+        name: version !== "" ? version : family, version: version,
+        total: 0, input: 0, output: 0, cacheRead: 0, cacheWrite: 0
+      })
+      var total = input + output + cacheRead + cacheWrite
+      var sums = [fam, v]
+      for (var k = 0; k < 2; k++) {
+        sums[k].total += total
+        sums[k].input += input
+        sums[k].output += output
+        sums[k].cacheRead += cacheRead
+        sums[k].cacheWrite += cacheWrite
+      }
     }
-    rows.sort(function(a, b) { return b.total - a.total })
-    return rows.slice(0, 4)
+    var list = []
+    for (var f in families) list.push(families[f])
+    list.sort(function(a, b) { return b.total - a.total })
+    list = list.slice(0, 4)
+    var rows = []
+    for (var i = 0; i < list.length; i++) {
+      var versions = []
+      for (var key in list[i].versions) versions.push(list[i].versions[key])
+      versions.sort(function(a, b) { return parseFloat(a.version) - parseFloat(b.version) })
+      var peak = 1
+      for (var j = 0; j < versions.length; j++) peak = Math.max(peak, versions[j].total)
+      // A family with a single unnumbered entry is just its header line.
+      if (versions.length === 1 && versions[0].version === "") {
+        rows.push({ name: list[i].name, total: list[i].total, input: list[i].input, output: list[i].output,
+                    cacheRead: list[i].cacheRead, cacheWrite: list[i].cacheWrite, header: false, indent: false, peak: peak })
+        continue
+      }
+      rows.push({ name: list[i].name, total: list[i].total, input: list[i].input, output: list[i].output,
+                  cacheRead: list[i].cacheRead, cacheWrite: list[i].cacheWrite, header: true, indent: false, peak: peak })
+      for (var m = 0; m < versions.length; m++) {
+        var ver = versions[m]
+        rows.push({ name: ver.name, total: ver.total, input: ver.input, output: ver.output,
+                    cacheRead: ver.cacheRead, cacheWrite: ver.cacheWrite, header: false, indent: true, peak: peak })
+      }
+    }
+    return rows
   }
 
   function modelTooltip(row) {
@@ -1484,9 +1523,10 @@ Panel {
                     required property var modelData
                     width: modelSection.width
                     row: modelData
-                    // Scaled to the heaviest model, so the top row is always full —
-                    // the same scale-to-peak the weekly chart uses for its busiest day.
-                    share: modelData.total / Math.max(1, root.models[0].total)
+                    // Scaled to the heaviest version inside its own family, so each
+                    // family's top row is full — the scale-to-peak the weekly chart
+                    // uses for its busiest day. A family header draws no bar.
+                    share: modelData.header ? 0 : modelData.total / Math.max(1, modelData.peak)
                   }
                 }
               }
@@ -1860,7 +1900,7 @@ Panel {
     Rectangle {
       anchors.fill: parent
       radius: Style.cornerRadius
-      color: root.alpha(root.foreground, 0.05)
+      color: modelRow.row && modelRow.row.header ? "transparent" : root.alpha(root.foreground, 0.05)
     }
 
     Rectangle {
@@ -1883,9 +1923,10 @@ Panel {
       color: root.foreground
       font.family: root.fontFamily
       font.pixelSize: Style.font.bodySmall
+      font.bold: modelRow.row ? modelRow.row.header : false
       elide: Text.ElideRight
       anchors.left: parent.left
-      anchors.leftMargin: Style.space(8)
+      anchors.leftMargin: Style.space(modelRow.row && modelRow.row.indent ? 20 : 8)
       anchors.right: modelTokens.left
       anchors.rightMargin: Style.space(8)
       anchors.verticalCenter: parent.verticalCenter
