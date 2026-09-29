@@ -302,10 +302,13 @@ Panel {
       versions.sort(function(a, b) { return parseFloat(a.version) - parseFloat(b.version) })
       var peak = 1
       for (var j = 0; j < versions.length; j++) peak = Math.max(peak, versions[j].total)
-      // A family with a single unnumbered entry is just its header line.
-      if (versions.length === 1 && versions[0].version === "") {
-        rows.push({ name: list[i].name, total: list[i].total, input: list[i].input, output: list[i].output,
-                    cacheRead: list[i].cacheRead, cacheWrite: list[i].cacheWrite, header: false, indent: false, peak: peak })
+      // Bars only compare things: a family with one shown version has nothing
+      // to be compared with, so it is one plain line ("Fable 5.1  2.9B").
+      if (versions.length === 1) {
+        var only = versions[0]
+        rows.push({ name: only.version !== "" ? list[i].name + " " + only.version : list[i].name,
+                    total: list[i].total, input: list[i].input, output: list[i].output,
+                    cacheRead: list[i].cacheRead, cacheWrite: list[i].cacheWrite, header: true, indent: false, peak: peak })
         continue
       }
       rows.push({ name: list[i].name, total: list[i].total, input: list[i].input, output: list[i].output,
