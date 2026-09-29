@@ -5,6 +5,7 @@ import Quickshell.Io
 import qs.Commons
 import qs.Ui
 import "Budget.js" as Budget
+import "Models.js" as Models
 
 Panel {
   id: root
@@ -42,7 +43,7 @@ Panel {
   // figures, and showing those is worse than showing nothing.
   readonly property var limits: providerWindows(provider, candidate)
   readonly property bool accountsRefreshing: usage.swapkinLoading || probeProcess.running
-  readonly property var models: modelRows(provider)
+  readonly property var models: modelRows(provider, modelsHiddenText)
   readonly property var headline: tightest(limits)
   readonly property var balance: provider ? (provider.balance || null) : null
   // A prepaid account runs low the way a subscription window fills up: the
@@ -260,8 +261,8 @@ Panel {
   // Grouped by family: "Opus" once, with its versions (5, 5.5) listed under it,
   // so a new point release does not look like a different model. A family's
   // header carries the sum; the bars under it compare versions on one scale.
-  function modelRows(p) {
-    var usageByModel = p ? (p.modelUsage || {}) : {}
+  function modelRows(p, hiddenText) {
+    var usageByModel = Models.shownUsage(p ? p.modelUsage : {}, hiddenText)
     var families = {}
     for (var id in usageByModel) {
       var bucket = usageByModel[id] || {}
@@ -361,6 +362,7 @@ Panel {
     managing = false
     colourEditing = ""
     paceCursor = -1
+    modelCursor = -1
     nowMs = Date.now()
     if (detailFlick) detailFlick.contentY = 0
     usage.refreshLimits()
@@ -422,6 +424,7 @@ Panel {
     candName = ""
     managing = false
     paceCursor = -1
+    modelCursor = -1
   }
 
   function stepCandidate(direction) {
@@ -443,6 +446,7 @@ Panel {
     managing = !managing
     colourEditing = ""
     paceCursor = -1
+    modelCursor = -1
   }
 
   // ---- Weekly pace, edited from the manage screen ----
@@ -463,6 +467,27 @@ Panel {
   // two steppers (start -, start +, end -, end +).
   property int paceCursor: -1
   readonly property var paceRows: [[0, 1], [2, 3, 4, 5, 6, 7, 8], [9, 10], [11, 12]]
+
+  // ---- Models shown, edited from the manage screen ----
+  // Hiding a model only leaves it out of "tokens by model"; the usage itself
+  // is never touched. The hidden ids are one comma-separated plugin setting.
+  readonly property string modelsHiddenText: String(setting("modelsHidden", ""))
+  readonly property var modelChips: Models.chips(provider ? provider.modelUsage : {}, modelsHiddenText,
+                                                 function(id) { return usage.friendlyModelName(id) })
+  // Keyboard cursor: -1 off, 0..n-1 the chips, n the "Show all" button.
+  property int modelCursor: -1
+
+  function modelActivate(i) {
+    if (!canWritePace) return
+    if (i < modelChips.length) persistSettings({ modelsHidden: Models.toggleHidden(modelsHiddenText, modelChips[i].id) })
+    else persistSettings({ modelsHidden: "" })
+  }
+
+  function modelMove(delta) {
+    var to = modelCursor + delta
+    if (to < 0) { modelCursor = -1; return }
+    modelCursor = Math.min(modelChips.length, to)
+  }
 
   function persistSettings(values) {
     if (!canWritePace) return
@@ -767,15 +792,17 @@ Panel {
 
       onMoveRequested: function(dx, dy) {
         if (root.paceCursor >= 0) { root.paceMove(dx, dy); return }
+        if (root.modelCursor >= 0) { root.modelMove(dx + dy); return }
         root.cursorActive = true
         if (dy !== 0) root.selectProvider(root.providerIndex + dy)
         if (dx !== 0) root.stepCandidate(dx)
       }
-      onActivateRequested: if (root.paceCursor >= 0) root.paceActivate(root.paceCursor); else root.refreshNow()
-      onCloseRequested: if (root.paceCursor >= 0) root.paceCursor = -1; else root.close()
+      onActivateRequested: if (root.paceCursor >= 0) root.paceActivate(root.paceCursor); else if (root.modelCursor >= 0) root.modelActivate(root.modelCursor); else root.refreshNow()
+      onCloseRequested: if (root.paceCursor >= 0) root.paceCursor = -1; else if (root.modelCursor >= 0) root.modelCursor = -1; else root.close()
       onTabRequested: function(direction) { root.switchPanel(direction) }
       onTextKey: function(t) {
-        if ((t === "w" || t === "W") && root.managing) root.paceCursor = root.paceCursor >= 0 ? -1 : (root.paceWorking ? 2 : 0)
+        if ((t === "w" || t === "W") && root.managing) { root.modelCursor = -1; root.paceCursor = root.paceCursor >= 0 ? -1 : (root.paceWorking ? 2 : 0) }
+        else if ((t === "o" || t === "O") && root.managing && root.modelChips.length > 0) { root.paceCursor = -1; root.modelCursor = root.modelCursor >= 0 ? -1 : 0 }
         else if (t === "r" || t === "R") root.refreshNow()
         else if ((t === "a" || t === "A") && root.accounts.length > 1) root.switchToCandidate()
         else if ((t === "m" || t === "M") && root.canManage) root.toggleManage()
@@ -1263,6 +1290,65 @@ Panel {
                   text: root.canWritePace
                     ? "Click, or press w and use the arrow keys."
                     : "This shell cannot save from here. Edit the weekly budget in Omarchy plugin settings."
+                  color: root.dim
+                  font.family: root.fontFamily
+                  font.pixelSize: Style.font.caption
+                }
+
+                // ---- Models shown: which models the panel lists ----
+                PanelSeparator { foreground: root.foreground }
+
+                PanelSectionHeader {
+                  width: parent.width
+                  text: "MODELS SHOWN"
+                  foreground: root.foreground
+                  fontFamily: root.fontFamily
+                }
+
+                Flow {
+                  width: parent.width
+                  spacing: Style.space(6)
+                  enabled: root.canWritePace
+
+                  Repeater {
+                    model: root.modelChips
+
+                    Button {
+                      required property var modelData
+                      required property int index
+
+                      text: modelData.name + " \u00b7 " + usage.formatTokenCount(modelData.total)
+                      bordered: true
+                      selected: modelData.shown
+                      hasCursor: root.modelCursor === index
+                      foreground: root.foreground
+                      fontFamily: root.fontFamily
+                      fontSize: Style.font.caption
+                      verticalPadding: Style.spacing.controlPaddingY
+                      onClicked: root.modelActivate(index)
+                    }
+                  }
+
+                  Button {
+                    visible: root.modelsHiddenText !== ""
+                    text: "Show all"
+                    bordered: true
+                    hasCursor: root.modelCursor === root.modelChips.length
+                    foreground: root.foreground
+                    fontFamily: root.fontFamily
+                    fontSize: Style.font.caption
+                    verticalPadding: Style.spacing.controlPaddingY
+                    onClicked: root.modelActivate(root.modelChips.length)
+                  }
+                }
+
+                Text {
+                  textFormat: Text.PlainText
+                  width: parent.width
+                  wrapMode: Text.WordWrap
+                  text: root.canWritePace
+                    ? "Hides a model from Tokens by model only; no usage is deleted. Click, or press o."
+                    : "This shell cannot save from here. Edit the hidden models in Omarchy plugin settings."
                   color: root.dim
                   font.family: root.fontFamily
                   font.pixelSize: Style.font.caption
@@ -1760,10 +1846,12 @@ Panel {
           Repeater {
             model: root.paceCursor >= 0
               ? [{ k: "↑ ↓ ← →", l: "move" }, { k: "enter", l: "change" }, { k: "w", l: "back" }]
+              : root.modelCursor >= 0
+              ? [{ k: "↑ ↓ ← →", l: "move" }, { k: "enter", l: "show/hide" }, { k: "o", l: "back" }]
               : root.hasAccounts
-                ? [{ k: "↑ ↓", l: "provider" }, { k: "← →", l: "account" }, { k: "a", l: "switch" }, { k: "m", l: "manage" }].concat(root.managing ? [{ k: "w", l: "weekly pace" }] : [])
+                ? [{ k: "↑ ↓", l: "provider" }, { k: "← →", l: "account" }, { k: "a", l: "switch" }, { k: "m", l: "manage" }].concat(root.managing ? [{ k: "w", l: "weekly pace" }, { k: "o", l: "models" }] : [])
                 : root.canManage
-                  ? [{ k: "↑ ↓", l: "provider" }, { k: "m", l: "manage" }, { k: "r", l: "refresh" }].concat(root.managing ? [{ k: "w", l: "weekly pace" }] : [])
+                  ? [{ k: "↑ ↓", l: "provider" }, { k: "m", l: "manage" }, { k: "r", l: "refresh" }].concat(root.managing ? [{ k: "w", l: "weekly pace" }, { k: "o", l: "models" }] : [])
                   : [{ k: "↑ ↓", l: "provider" }, { k: "r", l: "refresh" }]
 
             Row {

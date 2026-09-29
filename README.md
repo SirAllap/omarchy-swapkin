@@ -192,7 +192,12 @@ omarchy bar set io.github.sirallap.swapkin watchIntervalMin 5 --json
 hours earn weekly budget. With no working day picked, or an end hour that is not
 after the start, the budget grows evenly all week.
 The manage screen has a Weekly pace block for the same four settings: Working
-hours or Every hour, the day chips, and the start and end hour.
+hours or Every hour, the day chips, and the start and end hour (key `w`).
+A Models shown block (key `o`) has one chip per model seen, with its token total:
+click, or arrow keys and enter, to hide an old model from Tokens by model. It
+only changes the list; no usage is deleted. `Show all` clears it, and a model
+that appears later is shown. It is the `modelsHidden` setting (comma-separated
+model ids, empty by default).
 
 `prices.json`, next to the plugin, holds the per-million-token rates used for the
 "at API prices" line. They change; edit the file rather than the code.

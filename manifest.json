@@ -36,7 +36,8 @@
       "budgetSpread": "Working days",
       "budgetDays": "Mon,Tue,Wed,Thu,Fri",
       "budgetStartHour": 9,
-      "budgetEndHour": 19
+      "budgetEndHour": 19,
+      "modelsHidden": ""
     },
     "schema": [
       {
@@ -126,6 +127,13 @@
         "step": 1,
         "defaultValue": 19,
         "description": "If the end is not after the start, the budget behaves like Every day."
+      },
+      {
+        "key": "modelsHidden",
+        "type": "string",
+        "label": "Hidden models",
+        "defaultValue": "",
+        "description": "Comma-separated model ids to leave out of Tokens by model, for example claude-opus-4-8,claude-haiku-4-5. Empty shows every model. Only the panel list changes; no usage is deleted."
       }
     ]
   },
