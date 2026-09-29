@@ -360,6 +360,7 @@ Panel {
     candName = ""
     managing = false
     colourEditing = ""
+    paceCursor = -1
     nowMs = Date.now()
     if (detailFlick) detailFlick.contentY = 0
     usage.refreshLimits()
@@ -420,6 +421,7 @@ Panel {
   onProviderIdChanged: {
     candName = ""
     managing = false
+    paceCursor = -1
   }
 
   function stepCandidate(direction) {
@@ -440,6 +442,64 @@ Panel {
   function toggleManage() {
     managing = !managing
     colourEditing = ""
+    paceCursor = -1
+  }
+
+  // ---- Weekly pace, edited from the manage screen ----
+  // The same four widget settings Omarchy's plugin settings page edits; the
+  // write is the one the clock panel uses (the shell rewrites shell.json and
+  // hands the entry back). Without that call on this shell the block stays
+  // read-only and says where to edit instead.
+  readonly property bool canWritePace: !!(bar && bar.shell && typeof bar.shell.updateEntryInline === "function")
+  readonly property bool paceWorking: String(setting("budgetSpread", Budget.DEFAULTS.spread)).toLowerCase().indexOf("work") >= 0
+  readonly property string paceDaysText: String(setting("budgetDays", Budget.DEFAULTS.days))
+  readonly property var paceDays: Budget.config("Working days", paceDaysText, 0, 24).days
+  readonly property var paceHours: Budget.stepHour(setting("budgetStartHour", Budget.DEFAULTS.startHour),
+                                                   setting("budgetEndHour", Budget.DEFAULTS.endHour), "start", 0)
+  // Monday first; the numbers are Budget's day indexes (0 = Sunday).
+  readonly property var paceDayOrder: [1, 2, 3, 4, 5, 6, 0]
+  readonly property var paceDayNames: ["Mon", "Tue", "Wed", "Thu", "Fri", "Sat", "Sun"]
+  // Keyboard cursor over the block: -1 off, 0-1 spread, 2-8 days, 9-12 the
+  // two steppers (start -, start +, end -, end +).
+  property int paceCursor: -1
+  readonly property var paceRows: [[0, 1], [2, 3, 4, 5, 6, 7, 8], [9, 10], [11, 12]]
+
+  function persistSettings(values) {
+    if (!canWritePace) return
+    var entry = { id: root.moduleName }
+    for (var existing in root.settings) if (existing !== "id") entry[existing] = root.settings[existing]
+    for (var key in values) entry[key] = values[key]
+    root.settings = entry
+    root.bar.shell.updateEntryInline(root.moduleName, entry)
+  }
+
+  function paceActivate(i) {
+    if (!canWritePace) return
+    if (i < 2) {
+      persistSettings({ budgetSpread: i === 0 ? "Working days" : "Every day" })
+    } else if (i < 9) {
+      var next = Budget.toggleDay(paceDaysText, paceDayOrder[i - 2])
+      if (next !== null) persistSettings({ budgetDays: next })
+    } else {
+      var h = Budget.stepHour(paceHours.start, paceHours.end, i < 11 ? "start" : "end", i % 2 === 1 ? -1 : 1)
+      persistSettings({ budgetStartHour: h.start, budgetEndHour: h.end })
+    }
+  }
+
+  function paceMove(dx, dy) {
+    var row = 0, col = 0
+    for (var r = 0; r < paceRows.length; r++) {
+      var at = paceRows[r].indexOf(paceCursor)
+      if (at >= 0) { row = r; col = at }
+    }
+    if (dy !== 0) {
+      var to = row + dy
+      if (to < 0) { paceCursor = -1; return }
+      if (to >= paceRows.length) return
+      paceCursor = paceRows[to][Math.min(col, paceRows[to].length - 1)]
+    } else {
+      paceCursor = paceRows[row][Math.max(0, Math.min(paceRows[row].length - 1, col + dx))]
+    }
   }
 
   function peakText(a) {
@@ -706,15 +766,17 @@ Panel {
       anchors.fill: parent
 
       onMoveRequested: function(dx, dy) {
+        if (root.paceCursor >= 0) { root.paceMove(dx, dy); return }
         root.cursorActive = true
         if (dy !== 0) root.selectProvider(root.providerIndex + dy)
         if (dx !== 0) root.stepCandidate(dx)
       }
-      onActivateRequested: root.refreshNow()
-      onCloseRequested: root.close()
+      onActivateRequested: if (root.paceCursor >= 0) root.paceActivate(root.paceCursor); else root.refreshNow()
+      onCloseRequested: if (root.paceCursor >= 0) root.paceCursor = -1; else root.close()
       onTabRequested: function(direction) { root.switchPanel(direction) }
       onTextKey: function(t) {
-        if (t === "r" || t === "R") root.refreshNow()
+        if ((t === "w" || t === "W") && root.managing) root.paceCursor = root.paceCursor >= 0 ? -1 : (root.paceWorking ? 2 : 0)
+        else if (t === "r" || t === "R") root.refreshNow()
         else if ((t === "a" || t === "A") && root.accounts.length > 1) root.switchToCandidate()
         else if ((t === "m" || t === "M") && root.canManage) root.toggleManage()
       }
@@ -1058,6 +1120,149 @@ Panel {
                   width: parent.width
                   wrapMode: Text.WordWrap
                   text: (root.provider ? root.provider.addHint : "") + " Click a dot to recolour an account."
+                  color: root.dim
+                  font.family: root.fontFamily
+                  font.pixelSize: Style.font.caption
+                }
+
+                // ---- Weekly pace: the days and hours that earn budget ----
+                PanelSeparator { foreground: root.foreground }
+
+                PanelSectionHeader {
+                  width: parent.width
+                  text: "WEEKLY PACE"
+                  foreground: root.foreground
+                  fontFamily: root.fontFamily
+                }
+
+                Row {
+                  width: parent.width
+                  spacing: Style.space(6)
+                  enabled: root.canWritePace
+
+                  Repeater {
+                    model: ["Working hours", "Every hour"]
+
+                    Button {
+                      required property var modelData
+                      required property int index
+
+                      width: (parent.width - parent.spacing) / 2
+                      text: modelData
+                      bordered: true
+                      selected: (index === 0) === root.paceWorking
+                      hasCursor: root.paceCursor === index
+                      foreground: root.foreground
+                      fontFamily: root.fontFamily
+                      fontSize: Style.font.caption
+                      verticalPadding: Style.spacing.controlPaddingY
+                      onClicked: root.paceActivate(index)
+                    }
+                  }
+                }
+
+                Row {
+                  width: parent.width
+                  spacing: Style.space(4)
+                  enabled: root.canWritePace
+                  opacity: root.paceWorking ? 1 : 0.45
+
+                  Repeater {
+                    model: root.paceDayNames
+
+                    Button {
+                      required property var modelData
+                      required property int index
+
+                      width: (parent.width - parent.spacing * 6) / 7
+                      text: modelData
+                      bordered: true
+                      selected: root.paceDays[root.paceDayOrder[index]]
+                      hasCursor: root.paceCursor === index + 2
+                      foreground: root.foreground
+                      fontFamily: root.fontFamily
+                      fontSize: Style.font.caption
+                      horizontalPadding: Style.space(2)
+                      verticalPadding: Style.spacing.controlPaddingY
+                      onClicked: root.paceActivate(index + 2)
+                    }
+                  }
+                }
+
+                Repeater {
+                  model: [{ label: "Work starts", value: root.paceHours.start, first: 9 },
+                          { label: "Work ends", value: root.paceHours.end, first: 11 }]
+
+                  Item {
+                    required property var modelData
+
+                    width: parent.width
+                    implicitHeight: Math.max(stepLabel.implicitHeight, stepDown.implicitHeight)
+                    opacity: root.paceWorking ? 1 : 0.45
+
+                    Text {
+                      id: stepLabel
+                      textFormat: Text.PlainText
+                      anchors.left: parent.left
+                      anchors.verticalCenter: parent.verticalCenter
+                      text: parent.modelData.label
+                      color: root.dim
+                      font.family: root.fontFamily
+                      font.pixelSize: Style.font.caption
+                    }
+
+                    Row {
+                      anchors.right: parent.right
+                      anchors.verticalCenter: parent.verticalCenter
+                      spacing: Style.space(6)
+                      enabled: root.canWritePace
+
+                      Button {
+                        id: stepDown
+                        text: "\u2212"
+                        bordered: true
+                        hasCursor: root.paceCursor === parent.parent.modelData.first
+                        foreground: root.foreground
+                        fontFamily: root.fontFamily
+                        fontSize: Style.font.caption
+                        horizontalPadding: Style.space(10)
+                        verticalPadding: Style.spacing.controlPaddingY
+                        onClicked: root.paceActivate(parent.parent.modelData.first)
+                      }
+
+                      Text {
+                        textFormat: Text.PlainText
+                        anchors.verticalCenter: parent.verticalCenter
+                        width: Style.space(44)
+                        horizontalAlignment: Text.AlignHCenter
+                        text: Budget.hourText(parent.parent.modelData.value)
+                        color: root.foreground
+                        font.family: root.fontFamily
+                        font.pixelSize: Style.font.bodySmall
+                      }
+
+                      Button {
+                        text: "+"
+                        bordered: true
+                        hasCursor: root.paceCursor === parent.parent.modelData.first + 1
+                        foreground: root.foreground
+                        fontFamily: root.fontFamily
+                        fontSize: Style.font.caption
+                        horizontalPadding: Style.space(10)
+                        verticalPadding: Style.spacing.controlPaddingY
+                        onClicked: root.paceActivate(parent.parent.modelData.first + 1)
+                      }
+                    }
+                  }
+                }
+
+                Text {
+                  textFormat: Text.PlainText
+                  width: parent.width
+                  wrapMode: Text.WordWrap
+                  text: root.canWritePace
+                    ? "Click, or press w and use the arrow keys."
+                    : "This shell cannot save from here. Edit the weekly budget in Omarchy plugin settings."
                   color: root.dim
                   font.family: root.fontFamily
                   font.pixelSize: Style.font.caption
@@ -1553,11 +1758,13 @@ Panel {
           spacing: Style.space(16)
 
           Repeater {
-            model: root.hasAccounts
-              ? [{ k: "↑ ↓", l: "provider" }, { k: "← →", l: "account" }, { k: "a", l: "switch" }, { k: "m", l: "manage" }]
-              : root.canManage
-                ? [{ k: "↑ ↓", l: "provider" }, { k: "m", l: "manage" }, { k: "r", l: "refresh" }]
-                : [{ k: "↑ ↓", l: "provider" }, { k: "r", l: "refresh" }]
+            model: root.paceCursor >= 0
+              ? [{ k: "↑ ↓ ← →", l: "move" }, { k: "enter", l: "change" }, { k: "w", l: "back" }]
+              : root.hasAccounts
+                ? [{ k: "↑ ↓", l: "provider" }, { k: "← →", l: "account" }, { k: "a", l: "switch" }, { k: "m", l: "manage" }].concat(root.managing ? [{ k: "w", l: "weekly pace" }] : [])
+                : root.canManage
+                  ? [{ k: "↑ ↓", l: "provider" }, { k: "m", l: "manage" }, { k: "r", l: "refresh" }].concat(root.managing ? [{ k: "w", l: "weekly pace" }] : [])
+                  : [{ k: "↑ ↓", l: "provider" }, { k: "r", l: "refresh" }]
 
             Row {
               required property var modelData

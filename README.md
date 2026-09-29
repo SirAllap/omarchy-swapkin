@@ -20,7 +20,7 @@ it, so settings, sessions, skills, hooks and MCP logins are untouched.
   enough it never scrolls; on a shorter one the columns scroll inside it.
 - **Switch accounts from the bar.** Every account is a card. Move over one to
   preview its limits, then switch. Keys: `↑` `↓` provider, `←` `→` account,
-  `a` switch, `m` manage, `r` refresh.
+  `a` switch, `m` manage (`w` inside it edits the weekly pace), `r` refresh.
 - **Each account keeps its own colour**, shown in the bar icon, the account list
   and, if you want it, the Claude Code status line.
 - **Limits for every account**, not only the active one: session window, weekly
@@ -191,6 +191,8 @@ omarchy bar set io.github.sirallap.swapkin watchIntervalMin 5 --json
 `budgetStartHour` (9) and `budgetEndHour` (19) shape the pace curve: only those
 hours earn weekly budget. With no working day picked, or an end hour that is not
 after the start, the budget grows evenly all week.
+The manage screen has a Weekly pace block for the same four settings: Working
+hours or Every hour, the day chips, and the start and end hour.
 
 `prices.json`, next to the plugin, holds the per-million-token rates used for the
 "at API prices" line. They change; edit the file rather than the code.

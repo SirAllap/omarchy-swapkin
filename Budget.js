@@ -180,9 +180,39 @@ function resetLine(resetMs, nowMs) {
   return "Resets " + whenText(resetMs, nowMs) + " · in " + durationText(resetMs - nowMs)
 }
 
+// The manage screen edits the same three settings the plugin already has. These
+// keep the days text in its stored shape (comma-separated three-letter names,
+// Monday first) and refuse the edits the UI must never reach: no day left on,
+// or an end that is not after the start. `day` is a DAY_NAMES index (0 = Sun).
+var WEEK_ORDER = [1, 2, 3, 4, 5, 6, 0]
+
+function daysText(days) {
+  return WEEK_ORDER.filter(function(d) { return days[d] }).map(function(d) { return DAY_NAMES[d] }).join(",")
+}
+
+// The new days text, or null when the toggle would leave no day on.
+function toggleDay(text, day) {
+  var days = config("Working days", text, 9, 19).days
+  days[day] = !days[day]
+  return days.some(function(on) { return on }) ? daysText(days) : null
+}
+
+// Whole hours, start 0-23, end 1-24, end > start. Returns {start, end}; the
+// same values when the step would break a bound.
+function stepHour(start, end, which, delta) {
+  var s = Math.round(Number(start)), e = Math.round(Number(end))
+  if (!(s >= 0 && s <= 23)) s = DEFAULTS.startHour
+  if (!(e >= 1 && e <= 24) || e <= s) e = Math.max(s + 1, Math.min(24, DEFAULTS.endHour))
+  if (which === "start") s = Math.max(0, Math.min(e - 1, s + delta))
+  else e = Math.min(24, Math.max(s + 1, e + delta))
+  return { start: s, end: e }
+}
+
+function hourText(h) { return (h < 10 ? "0" : "") + h + ":00" }
+
 // Loaded by node for the tests; QML never sees `module`.
 if (typeof module !== "undefined") module.exports = {
   config: config, defaultConfig: defaultConfig, DEFAULTS: DEFAULTS, segments: segments, workMs: workMs, walk: walk,
   pace: pace, whenText: whenText, paceLine: paceLine, forecastLine: forecastLine, resetLine: resetLine,
-  durationText: durationText
+  durationText: durationText, toggleDay: toggleDay, stepHour: stepHour, hourText: hourText, daysText: daysText
 }

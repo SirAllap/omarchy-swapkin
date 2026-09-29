@@ -79,4 +79,22 @@ const eager = B.pace(work, 0.6, at(2026, 9, 25, 20), 7 * D, at(2026, 9, 21, 9, 2
 assert.strictEqual(eager.state, "over")
 const atStart = B.pace(work, 0.6, reset, 7 * D, reset - 7 * D)
 assert.ok(atStart === null || atStart.projected < 0 || isFinite(atStart.projected))
+// Manage screen helpers: toggling keeps the stored shape and at least one day.
+assert.strictEqual(B.toggleDay("Mon,Tue,Wed,Thu,Fri", 6), "Mon,Tue,Wed,Thu,Fri,Sat")
+assert.strictEqual(B.toggleDay("Mon,Tue,Wed,Thu,Fri", 3), "Mon,Tue,Thu,Fri")
+assert.strictEqual(B.toggleDay("Sat", 0), "Sat,Sun")
+assert.strictEqual(B.toggleDay("Sun", 0), null)
+assert.strictEqual(B.toggleDay("", 2), "Tue")
+assert.strictEqual(B.toggleDay("nonsense", 1), "Mon")
+assert.strictEqual(B.config("Working days", B.toggleDay("Mon", 0), 9, 19).days[0], true)
+// Steppers: whole hours, end after start, 0-24.
+assert.deepStrictEqual(B.stepHour(9, 19, "start", 1), { start: 10, end: 19 })
+assert.deepStrictEqual(B.stepHour(0, 19, "start", -1), { start: 0, end: 19 })
+assert.deepStrictEqual(B.stepHour(18, 19, "start", 1), { start: 18, end: 19 })
+assert.deepStrictEqual(B.stepHour(9, 10, "end", -1), { start: 9, end: 10 })
+assert.deepStrictEqual(B.stepHour(9, 24, "end", 1), { start: 9, end: 24 })
+assert.deepStrictEqual(B.stepHour(9, 19, "end", -1), { start: 9, end: 18 })
+assert.deepStrictEqual(B.stepHour(20, 10, "start", 1), { start: 20, end: 21 }) // repairs a broken pair first
+assert.strictEqual(B.hourText(9), "09:00")
+assert.strictEqual(B.hourText(24), "24:00")
 console.log("budget: all passed")
