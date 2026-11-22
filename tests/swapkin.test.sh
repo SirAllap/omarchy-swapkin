@@ -1004,6 +1004,60 @@ echo '{"refreshToken":"short","subscriptionType":"max"}' > "$SWAPKIN_DIR/work/oa
 sk "$SWAPKIN" check >/dev/null
 assert_eq "a target without a real login: no switch" personal "$(active_is)"
 
+echo "21c-codex. check also auto-switches Codex (2+ accounts), same settings, log and guard"
+CODEX_DIR() { echo "$SWAPKIN_DIR/providers/codex"; }
+codex_account() { # name
+  mkdir -p "$(CODEX_DIR)/$1" "$S/codex-home-$1"
+  echo '{"tokens":{"id_token":"fixture"}}' > "$S/codex-home-$1/auth.json"
+  jq -n --arg h "$S/codex-home-$1" '{home:$h}' > "$(CODEX_DIR)/$1/codex.json"
+  jq -n '{colour:"#7fa7d9"}' > "$(CODEX_DIR)/$1/meta.json"
+}
+codex_usage() { # name fraction-used
+  jq -nc --argjson p "$2" --arg r "$(date -u -d '+2 hours' +%Y-%m-%dT%H:%M:%SZ)" \
+    '{limits:[{label:"5h window",percent:$p,resetsAt:$r},{label:"Weekly",percent:0.30,resetsAt:$r}]}' > "$(CODEX_DIR)/$1/usage.json"
+}
+codex_world() { # config-json ; claude: personal+work, codex: cx-a (active) + cx-b
+  auto_world "$1"; healthy work; healthy personal
+  codex_account cx-a; codex_account cx-b
+  echo cx-a > "$(CODEX_DIR)/active"
+  codex_usage cx-b 0.20
+}
+codex_active() { cat "$(CODEX_DIR)/active"; }
+codex_world '{"autoSwitch":true}'; codex_usage cx-a 0.97
+sk "$SWAPKIN" check >/dev/null
+assert_eq "codex: low account hands over to the roomy one" cx-b "$(codex_active)"
+assert_eq "codex: the Claude active account is untouched" personal "$(active_is)"
+assert_contains "codex: log line carries the provider" "$(cat "$(AUTOLOG)")" "[codex autoSwitch=true"
+assert_contains "codex: log records the switch" "$(cat "$(AUTOLOG)")" "switched cx-a -> cx-b"
+assert_contains "codex: notification says where it went" "$(cat "$NOTIFY_LOG")" "Switched to cx-b"
+codex_world '{"autoSwitch":false}'; codex_usage cx-a 0.97
+sk "$SWAPKIN" check >/dev/null
+assert_eq "codex: auto-switch off means off" cx-a "$(codex_active)"
+assert_contains "codex: off is logged" "$(cat "$(AUTOLOG)")" "[codex autoSwitch=false"
+codex_world '{"autoSwitch":true}'; codex_usage cx-a 0.97
+touch -d '3 hours ago' "$(CODEX_DIR)/cx-a/usage.json"
+sk "$SWAPKIN" check >/dev/null
+assert_eq "codex: stale figures, no switch" cx-a "$(codex_active)"
+assert_contains "codex: stale is logged" "$(cat "$(AUTOLOG)")" "codex autoSwitch=true"
+codex_world '{"autoSwitch":true}'; codex_usage cx-a 0.97
+touch -d '3 hours ago' "$(CODEX_DIR)/cx-b/usage.json"
+sk "$SWAPKIN" check >/dev/null
+assert_eq "codex: stale target, no switch" cx-a "$(codex_active)"
+codex_world '{"autoSwitch":true}'; codex_usage cx-a 0.97
+rm "$S/codex-home-cx-b/auth.json"
+sk "$SWAPKIN" check >/dev/null
+assert_eq "codex: target without a login, no switch" cx-a "$(codex_active)"
+codex_world '{"autoSwitch":true}'; codex_usage cx-a 0.97
+rm -rf "$(CODEX_DIR)/cx-b"
+sk "$SWAPKIN" check >/dev/null
+assert_eq "codex: one account only, nothing happens" cx-a "$(codex_active)"
+codex_world '{"autoSwitch":true,"autoSwitchReturn":true}'; codex_usage cx-a 0.97
+sk "$SWAPKIN" check >/dev/null
+codex_usage cx-a 0.20; codex_usage cx-b 0.50
+sk "$SWAPKIN" check >/dev/null
+assert_eq "codex: hands back once the old account recovered" cx-a "$(codex_active)"
+assert_contains "codex: return is logged" "$(cat "$(AUTOLOG)")" "returned cx-b -> cx-a"
+
 echo "21h. the decision log keeps the last 200 lines"
 auto_world '{"autoSwitch":true}'
 mkdir -p "$(dirname "$(AUTOLOG)")"

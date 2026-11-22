@@ -346,3 +346,5 @@ p_probe() { # name
 
 p_plan() { jq -r '.tierLabel // empty' "$(account_dir "$1")/usage.json" 2>/dev/null; }
 
+# Auto-switch only hands over to a saved account that has a login on disk.
+p_plausible_login() { local home; home=$(home_of "$1"); [[ -n $home && -f $home/auth.json ]]; }

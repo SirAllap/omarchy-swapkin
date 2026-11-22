@@ -204,6 +204,10 @@ all_provider_ids() {
   done
 }
 
+# Auto-switch engine shared by the providers `check` watches.
+# shellcheck source=/dev/null
+source "$SCRIPT_DIR/autoswitch.sh"
+
 # --- load one provider's adapter into this process (contract functions p_*) ---
 load_adapter() { # id
   local id="$1"
@@ -628,10 +632,7 @@ case "$cmd" in
   check)
     load_adapter claude
     claude_check
-    # Finish a Codex daemon restart that was waiting for the last session to close.
-    # The Claude adapter is done first: loading the Codex adapter replaces p_use and friends.
-    load_adapter codex
-    declare -F p_housekeeping >/dev/null && p_housekeeping ;;
+    codex_check ;;
   note)  # one line in the watchdog log, written by the shell side of the watchdog
     load_adapter claude
     auto_log "${2:-}" ;;
