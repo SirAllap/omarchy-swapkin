@@ -383,6 +383,7 @@ Item {
       modeLabel: sp ? String(sp.modeLabel || "") : "",
       modeWords: sp ? String(sp.modeWords || "") : "",
       sessions: sp ? numberValue(sp.sessions) : 0,
+      reloadPending: sp ? String(sp.reloadPending || "") : "",
       store: sp ? String(sp.store || "") : "",
       how: sp ? String(sp.how || "") : "",
       addHint: sp ? String(sp.addHint || "") : "",
