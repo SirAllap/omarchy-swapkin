@@ -52,15 +52,39 @@ ACCOUNT_KEYS='["oauthAccount","userID","modelAccessCache","orgModelDefaultCache"
 # Claude Code refetches them for whoever is signed in.
 VOLATILE_KEYS='["cachedStatsigGates","cachedExperimentData","cachedExperimentFeatures","cachedGrowthBookFeatures","cachedGrowthBookFeaturesAt","autoCompactWindowsCache"]'
 
+# Who a token belongs to, asked of Anthropic's profile endpoint. Empty when it
+# cannot be told (offline, expired, slow): callers then keep what they have.
+token_uuid() { # access-token
+  [[ -n $1 ]] || return 0
+  curl -fsS --max-time 5 -H "Authorization: Bearer $1" -H "anthropic-beta: oauth-2025-04-20" \
+    "${SWAPKIN_PROFILE_URL:-https://api.anthropic.com/api/oauth/profile}" 2>/dev/null \
+    | jq -r '.account.uuid // empty' 2>/dev/null || true
+}
+
 # Copy a login out of a config dir into a profile.
+# ~/.claude.json is shared by every open Claude Code session, and an older
+# session rewrites it with ITS account. So oauthAccount (and the per-account
+# keys with it) is only taken when it belongs to the token being saved. Not
+# told (offline)? Take it only when it matches what the profile already holds.
 store() { # name creds-file state-file
   local dir; dir=$(account_dir "$1")
   mkdir -p "$dir"
   jq -e '.claudeAiOauth.refreshToken' "$2" >/dev/null 2>&1 || die "no Claude login found in $2"
   jq '.claudeAiOauth' "$2" > "$dir/oauth.json.tmp"
-  jq --argjson keys "$ACCOUNT_KEYS" 'with_entries(select(.key as $k | $keys | index($k)))' "$3" > "$dir/account.json.tmp"
+  local owner live saved trust=0
+  owner=$(token_uuid "$(jq -r '.claudeAiOauth.accessToken // empty' "$2" 2>/dev/null)")
+  live=$(jq -r '.oauthAccount.accountUuid // empty' "$3" 2>/dev/null || true)
+  saved=$(jq -r '.oauthAccount.accountUuid // empty' "$dir/account.json" 2>/dev/null || true)
+  if [[ -n $owner ]]; then [[ $live == "$owner" ]] && trust=1
+  else [[ -z $saved || $live == "$saved" ]] && trust=1; fi
+  if (( trust )); then
+    jq --argjson keys "$ACCOUNT_KEYS" 'with_entries(select(.key as $k | $keys | index($k)))' "$3" > "$dir/account.json.tmp"
+    mv "$dir/account.json.tmp" "$dir/account.json"
+  else
+    auto_log "account mismatch: $1 saved profile kept, live ~/.claude.json holds another account (${live:-none})"
+    [[ -f $dir/account.json ]] || echo '{}' > "$dir/account.json"
+  fi
   mv "$dir/oauth.json.tmp" "$dir/oauth.json"
-  mv "$dir/account.json.tmp" "$dir/account.json"
 }
 
 # Refresh tokens rotate, so the live login goes back to its profile before every switch.
@@ -87,8 +111,20 @@ p_use() {
   # Drop the outgoing account's per-user flags, then lay the incoming account's
   # own keys on top. Everything else in .claude.json — projects, history,
   # onboarding, this machine's ids — stays exactly as it was.
+  # A saved profile whose oauthAccount belongs to another token is never merged.
+  local owner mine; owner=$(token_uuid "$(jq -r '.accessToken // empty' "$dir/oauth.json" 2>/dev/null)")
+  mine=$(jq -r '.oauthAccount.accountUuid // empty' "$dir/account.json" 2>/dev/null || true)
+  if [[ -n $owner && -n $mine && $owner != "$mine" ]]; then
+    auto_log "account mismatch: $name saved profile belongs to another account, not merged"
+    # Drop the outgoing account's own keys too; Claude Code refetches them.
+    echo '{}' > "$dir/account.use.json"
+    replace "$STATE" 'with_entries(select(.key as $k | $keys | index($k) | not))' --argjson keys "$ACCOUNT_KEYS"
+  else
+    cp "$dir/account.json" "$dir/account.use.json"
+  fi
   replace "$STATE" 'with_entries(select(.key as $k | $vol | index($k) | not)) * $a[0]' \
-    --argjson vol "$VOLATILE_KEYS" --slurpfile a "$dir/account.json"
+    --argjson vol "$VOLATILE_KEYS" --slurpfile a "$dir/account.use.json"
+  rm -f "$dir/account.use.json"
   set_active "$name"
   echo "Active: $name"
 }

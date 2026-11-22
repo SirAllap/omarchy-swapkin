@@ -50,6 +50,8 @@ EOF
 }
 # Default secret-tool finds nothing, so the real keyring never decides a test.
 mk_stub secret-tool "exit 1"
+# No test reaches the real profile endpoint: default curl fails (= offline).
+mk_stub curl "exit 7"
 
 sandbox() {
   local dir; dir=$(mktemp -d)
@@ -86,6 +88,43 @@ assert_eq "outgoing account's live login was saved back before the switch" "$LIV
 live_now=$(jq -r .claudeAiOauth.refreshToken "$CLAUDE_CONFIG_DIR/.credentials.json")
 assert_eq "live credentials now hold the incoming account's token" "$PERSONAL_TOKEN" "$live_now"
 assert_eq "active pointer updated" "personal" "$(cat "$SWAPKIN_DIR/active")"
+
+# ============================ claude profile keeps its own oauthAccount (#5) ==
+echo "claude save/use never mix in another account's oauthAccount"
+S=$(sandbox)
+export HOME="$S/home" SWAPKIN_DIR="$S/data" CLAUDE_CONFIG_DIR="$S/home/.claude" \
+       XDG_CONFIG_HOME="$S/config" XDG_STATE_HOME="$S/state" XDG_CACHE_HOME="$S/cache" \
+       PATH="$STUBS:$PATH" SWAPKIN_DEMO=0
+unset SWAPKIN_PROVIDER
+mkdir -p "$CLAUDE_CONFIG_DIR" "$SWAPKIN_DIR/a" "$SWAPKIN_DIR/b"
+UA=aaaaaaaa-0000-0000-0000-000000000001; UB=bbbbbbbb-0000-0000-0000-000000000002
+TA=$(printf 'a%.0s' {1..45}); TB=$(printf 'b%.0s' {1..45})
+# stub profile endpoint: the access token says who it is
+mk_stub curl 'for a; do :; done; case "$*" in *"Bearer acc-a"*) echo "{\"account\":{\"uuid\":\"'$UA'\"}}";; *"Bearer acc-b"*) echo "{\"account\":{\"uuid\":\"'$UB'\"}}";; *) exit 7;; esac'
+jq -n --arg t "$TB" '{claudeAiOauth:{refreshToken:$t, accessToken:"acc-b", subscriptionType:"max"}}' > "$CLAUDE_CONFIG_DIR/.credentials.json"
+# an old session rewrote the shared file with account A
+jq -n --arg u "$UA" '{oauthAccount:{accountUuid:$u,planDisplayName:"A-plan"}}' > "$CLAUDE_CONFIG_DIR/.claude.json"
+jq -n --arg u "$UB" '{oauthAccount:{accountUuid:$u,planDisplayName:"B-plan"}}' > "$SWAPKIN_DIR/b/account.json"
+jq -n --arg t "$TA" '{refreshToken:$t, accessToken:"acc-a", subscriptionType:"max"}' > "$SWAPKIN_DIR/a/oauth.json"
+jq -n --arg u "$UA" '{oauthAccount:{accountUuid:$u,planDisplayName:"A-plan"}}' > "$SWAPKIN_DIR/a/account.json"
+echo b > "$SWAPKIN_DIR/active"
+sk "$SWAPKIN" use a >/dev/null
+assert_eq "save: B's profile kept B's oauthAccount, not the live A one" "$UB" "$(jq -r .oauthAccount.accountUuid "$SWAPKIN_DIR/b/account.json")"
+assert_contains "mismatch is logged" "$(cat "$XDG_STATE_HOME/swapkin/autoswitch.log" 2>/dev/null)" "account mismatch"
+assert_eq "use: live oauthAccount is A's after switching to A" "$UA" "$(jq -r .oauthAccount.accountUuid "$CLAUDE_CONFIG_DIR/.claude.json")"
+# a profile that already holds the wrong account is not merged on use
+jq -n --arg u "$UB" '{oauthAccount:{accountUuid:$u,planDisplayName:"B-plan"}}' > "$SWAPKIN_DIR/a/account.json"
+jq -n '{theme:"dark"}' > "$CLAUDE_CONFIG_DIR/.claude.json"
+sk "$SWAPKIN" use b >/dev/null; sk "$SWAPKIN" use a >/dev/null
+assert_eq "use: another account's oauthAccount is not merged" "" "$(jq -r '.oauthAccount.accountUuid // empty' "$CLAUDE_CONFIG_DIR/.claude.json")"
+# offline: keep the previous saved one when live disagrees
+mk_stub curl "exit 7"
+jq -n --arg t "$TB" '{claudeAiOauth:{refreshToken:$t, accessToken:"acc-b"}}' > "$CLAUDE_CONFIG_DIR/.credentials.json"
+jq -n --arg u "$UA" '{oauthAccount:{accountUuid:$u}}' > "$CLAUDE_CONFIG_DIR/.claude.json"
+echo b > "$SWAPKIN_DIR/active"
+sk "$SWAPKIN" use a >/dev/null
+assert_eq "offline: saved oauthAccount kept when live disagrees" "$UB" "$(jq -r .oauthAccount.accountUuid "$SWAPKIN_DIR/b/account.json")"
+mk_stub curl "exit 7"
 
 # ======================================================= 2. codex writes no auth.json ==
 echo "2. codex use writes no auth.json anywhere"
