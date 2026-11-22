@@ -51,6 +51,15 @@ The widget replaces Omarchy's built-in Agents widget in the bar. To go back:
 omarchy plugin remove io.github.sirallap.swapkin
 ```
 
+The plugin does not put `swapkin` on your PATH. From the plugin folder run:
+
+```bash
+bin/swapkin install-cli
+```
+
+This links `~/.local/bin/swapkin` to the plugin's script. It replaces an old
+symlink and never a real file, and it is safe to run again.
+
 ## First run
 
 Open the panel, press **manage**, then **+ add account**.

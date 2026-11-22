@@ -127,31 +127,199 @@ assert_eq "offline: saved oauthAccount kept when live disagrees" "$UB" "$(jq -r 
 mk_stub curl "exit 7"
 
 # ======================================================= 2. codex writes no auth.json ==
-echo "2. codex use writes no auth.json anywhere"
+echo "2. codex use swaps the live ~/.codex/auth.json"
 S=$(sandbox)
 export HOME="$S/home" SWAPKIN_DIR="$S/data" XDG_CONFIG_HOME="$S/config" \
        XDG_STATE_HOME="$S/state" XDG_CACHE_HOME="$S/cache" PATH="$STUBS:$PATH"
-unset CLAUDE_CONFIG_DIR
-mkdir -p "$S/codex-home-a" "$S/codex-home-b"
-echo '{"tokens":{"id_token":"x"}}' > "$S/codex-home-a/auth.json"
-echo '{"tokens":{"id_token":"x"}}' > "$S/codex-home-b/auth.json"
-before_a=$(md5sum "$S/codex-home-a/auth.json" | cut -d' ' -f1)
-before_b=$(md5sum "$S/codex-home-b/auth.json" | cut -d' ' -f1)
+unset CLAUDE_CONFIG_DIR CODEX_HOME
+mkdir -p "$HOME/.codex/sessions" "$S/codex-home-b"
+echo '{"tokens":{"id_token":"tok-a"}}' > "$HOME/.codex/auth.json"
+echo 'model = "x"' > "$HOME/.codex/config.toml"
+echo 'hist' > "$HOME/.codex/history.jsonl"
+echo '{"tokens":{"id_token":"tok-b"}}' > "$S/codex-home-b/auth.json"
 mkdir -p "$SWAPKIN_DIR/providers/codex/work" "$SWAPKIN_DIR/providers/codex/side-project"
-jq -n --arg h "$S/codex-home-a" '{home:$h}' > "$SWAPKIN_DIR/providers/codex/work/codex.json"
+jq -n --arg h "$HOME/.codex" '{home:$h}' > "$SWAPKIN_DIR/providers/codex/work/codex.json"
 jq -n '{colour:"#7fa7d9"}' > "$SWAPKIN_DIR/providers/codex/work/meta.json"
 jq -n --arg h "$S/codex-home-b" '{home:$h}' > "$SWAPKIN_DIR/providers/codex/side-project/codex.json"
 jq -n '{colour:"#d97757"}' > "$SWAPKIN_DIR/providers/codex/side-project/meta.json"
 echo work > "$SWAPKIN_DIR/providers/codex/active"
+# Codex refreshed the live token since the account was saved.
+echo '{"tokens":{"id_token":"tok-a-refreshed"}}' > "$HOME/.codex/auth.json"
 
-before_count=$(find "$S" -name auth.json | wc -l)
 out=$(sk "$SWAPKIN" -p codex use side-project)
 assert_contains "codex use reports the new active account" "$out" "side-project"
-after_count=$(find "$S" -name auth.json | wc -l)
-assert_eq "no new auth.json files appeared anywhere under the sandbox" "$before_count" "$after_count"
-assert_eq "codex-home-a/auth.json untouched" "$before_a" "$(md5sum "$S/codex-home-a/auth.json" | cut -d' ' -f1)"
-assert_eq "codex-home-b/auth.json untouched" "$before_b" "$(md5sum "$S/codex-home-b/auth.json" | cut -d' ' -f1)"
+assert_contains "live auth.json is now side-project's" "$(cat "$HOME/.codex/auth.json")" "tok-b"
+assert_contains "outgoing refreshed token saved to its profile" "$(cat "$SWAPKIN_DIR/providers/codex/work/auth.json")" "tok-a-refreshed"
+assert_eq "live auth.json is owner-only" "600" "$(stat -c %a "$HOME/.codex/auth.json")"
+assert_eq "config.toml untouched" 'model = "x"' "$(cat "$HOME/.codex/config.toml")"
+assert_eq "history untouched" "hist" "$(cat "$HOME/.codex/history.jsonl")"
+assert_true test -d "$HOME/.codex/sessions"
 assert_eq "active pointer switched" "side-project" "$(cat "$SWAPKIN_DIR/providers/codex/active")"
+assert_eq "env codex still gives the account home" "export CODEX_HOME=$S/codex-home-b" "$(sk "$SWAPKIN" env codex)"
+
+sk "$SWAPKIN" -p codex use work >/dev/null
+assert_contains "switching back restores the refreshed token" "$(cat "$HOME/.codex/auth.json")" "tok-a-refreshed"
+assert_contains "side-project login saved on the way out" "$(cat "$SWAPKIN_DIR/providers/codex/side-project/auth.json")" "tok-b"
+
+echo "2a. a live login that is not the outgoing account's is not saved over it"
+echo '{"tokens":{"account_id":"acct-work","id_token":"w"}}' > "$SWAPKIN_DIR/providers/codex/work/auth.json"
+echo '{"tokens":{"account_id":"acct-stranger","id_token":"s"}}' > "$HOME/.codex/auth.json"
+out=$(sk "$SWAPKIN" -p codex use side-project 2>&1)
+assert_contains "mismatch warns" "$out" "not work's login"
+assert_contains "work profile kept its own tokens" "$(cat "$SWAPKIN_DIR/providers/codex/work/auth.json")" "acct-work"
+assert_contains "switch still completed" "$(cat "$HOME/.codex/auth.json")" "tok-b"
+sk "$SWAPKIN" -p codex use work >/dev/null
+
+echo "2b. CODEX_HOME overrides the live location"
+echo '{"tokens":{"id_token":"tok-a2"}}' > "$S/alt-live.json"
+mkdir -p "$S/alt"; cp "$S/alt-live.json" "$S/alt/auth.json"
+CODEX_HOME="$S/alt" sk "$SWAPKIN" -p codex use side-project >/dev/null
+assert_contains "CODEX_HOME auth.json swapped" "$(cat "$S/alt/auth.json")" "tok-b"
+
+echo "2c. codex use restarts the background server only when no codex is open"
+S=$(sandbox)
+export HOME="$S/home" SWAPKIN_DIR="$S/data" PATH="$STUBS:$PATH"
+unset CODEX_HOME
+mkdir -p "$HOME/.codex/app-server-daemon" "$S/bin" "$S/codex-home-d"
+echo '{"tokens":{"id_token":"tok-a"}}' > "$HOME/.codex/auth.json"
+echo '{"tokens":{"id_token":"tok-b"}}' > "$S/codex-home-d/auth.json"
+printf '#!/usr/bin/env bash\necho "$@" >> "%s/restart.log"\n' "$S" > "$S/bin/codex"; chmod +x "$S/bin/codex"
+for n in work side; do mkdir -p "$SWAPKIN_DIR/providers/codex/$n"; jq -n '{colour:"#7fa7d9"}' > "$SWAPKIN_DIR/providers/codex/$n/meta.json"; done
+jq -n --arg h "$HOME/.codex" '{home:$h}' > "$SWAPKIN_DIR/providers/codex/work/codex.json"
+jq -n --arg h "$S/codex-home-d" '{home:$h}' > "$SWAPKIN_DIR/providers/codex/side/codex.json"
+echo work > "$SWAPKIN_DIR/providers/codex/active"
+sleep 30 & DPID=$!
+echo "{\"pid\":$DPID}" > "$HOME/.codex/app-server-daemon/daemon.pid"
+out=$(SWAPKIN_CODEX_PIDS="" PATH="$S/bin:$PATH" sk "$SWAPKIN" -p codex use side)
+assert_contains "daemon restarted when no codex open" "$out" "Restarted the Codex background server"
+assert_contains "restart command used" "$(cat "$S/restart.log")" "app-server daemon restart"
+rm -f "$S/restart.log"
+sleep 30 & OPID=$!
+out=$(SWAPKIN_CODEX_PIDS="$OPID" PATH="$S/bin:$PATH" sk "$SWAPKIN" -p codex use work)
+assert_contains "panel told when codex is open" "$out" "the moment the last Codex closes"
+assert_true test ! -e "$S/restart.log"
+kill $DPID $OPID 2>/dev/null
+
+echo "2c2. a skipped restart is remembered and finished when codex closes"
+S=$(sandbox)
+export HOME="$S/home" SWAPKIN_DIR="$S/data" PATH="$STUBS:$PATH"
+unset CODEX_HOME
+mkdir -p "$HOME/.codex/app-server-daemon" "$S/bin" "$S/codex-home-d"
+echo '{"tokens":{"id_token":"tok-a"}}' > "$HOME/.codex/auth.json"
+echo '{"tokens":{"id_token":"tok-b"}}' > "$S/codex-home-d/auth.json"
+printf '#!/usr/bin/env bash\necho "$@" >> "%s/restart.log"\n' "$S" > "$S/bin/codex"; chmod +x "$S/bin/codex"
+for n in work side; do mkdir -p "$SWAPKIN_DIR/providers/codex/$n"; jq -n '{colour:"#7fa7d9"}' > "$SWAPKIN_DIR/providers/codex/$n/meta.json"; done
+jq -n --arg h "$HOME/.codex" '{home:$h}' > "$SWAPKIN_DIR/providers/codex/work/codex.json"
+jq -n --arg h "$S/codex-home-d" '{home:$h}' > "$SWAPKIN_DIR/providers/codex/side/codex.json"
+echo work > "$SWAPKIN_DIR/providers/codex/active"
+MARK="$SWAPKIN_DIR/providers/codex/reload-pending"
+sleep 30 & DPID=$!; sleep 30 & OPID=$!
+echo "{\"pid\":$DPID}" > "$HOME/.codex/app-server-daemon/daemon.pid"
+SWAPKIN_CODEX_PIDS="$OPID" PATH="$S/bin:$PATH" sk "$SWAPKIN" -p codex use side >/dev/null
+assert_true test -f "$MARK"
+assert_contains "marker holds the old account" "$(cat "$MARK")" "work"
+pj=$(SWAPKIN_CODEX_PIDS="$OPID" PATH="$S/bin:$PATH" sk "$SWAPKIN" providers --json)
+assert_contains "panel json carries the pending old account" "$(jq -r '.providers[] | select(.id=="codex") | .reloadPending' <<<"$pj")" "work"
+SWAPKIN_CODEX_PIDS="$OPID" PATH="$S/bin:$PATH" sk "$SWAPKIN" -p codex list >/dev/null
+assert_true test -f "$MARK"
+assert_true test ! -e "$S/restart.log"
+SWAPKIN_CODEX_PIDS="" PATH="$S/bin:$PATH" sk "$SWAPKIN" check >/dev/null 2>&1
+assert_true test ! -e "$MARK"
+assert_contains "check restarted the daemon" "$(cat "$S/restart.log")" "app-server daemon restart"
+# pending again: a later list finishes it
+printf 'work\n' > "$MARK"; rm -f "$S/restart.log"
+SWAPKIN_CODEX_PIDS="" PATH="$S/bin:$PATH" sk "$SWAPKIN" -p codex list >/dev/null
+assert_true test ! -e "$MARK"
+assert_true test -f "$S/restart.log"
+# pending again: use of the account already active finishes it
+printf 'work\n' > "$MARK"; rm -f "$S/restart.log"
+SWAPKIN_CODEX_PIDS="" PATH="$S/bin:$PATH" sk "$SWAPKIN" -p codex use side >/dev/null
+assert_true test ! -e "$MARK"
+# daemon gone: marker dropped, no restart
+printf 'work\n' > "$MARK"; rm -f "$S/restart.log"; kill $DPID
+sleep 0.2
+SWAPKIN_CODEX_PIDS="" PATH="$S/bin:$PATH" sk "$SWAPKIN" -p codex list >/dev/null
+assert_true test ! -e "$MARK"
+assert_true test ! -e "$S/restart.log"
+kill $OPID 2>/dev/null
+
+echo "2c4. a waiter restarts the daemon the moment codex closes"
+S=$(sandbox)
+export HOME="$S/home" SWAPKIN_DIR="$S/data"; unset CODEX_HOME
+mkdir -p "$HOME/.codex/app-server-daemon" "$S/bin" "$S/codex-home-d"
+echo '{"tokens":{"id_token":"tok-a"}}' > "$HOME/.codex/auth.json"
+echo '{"tokens":{"id_token":"tok-b"}}' > "$S/codex-home-d/auth.json"
+printf '#!/usr/bin/env bash\necho "$@" >> "%s/restart.log"\n' "$S" > "$S/bin/codex"; chmod +x "$S/bin/codex"
+for n in work side; do mkdir -p "$SWAPKIN_DIR/providers/codex/$n"; jq -n '{colour:"#7fa7d9"}' > "$SWAPKIN_DIR/providers/codex/$n/meta.json"; done
+jq -n --arg h "$HOME/.codex" '{home:$h}' > "$SWAPKIN_DIR/providers/codex/work/codex.json"
+jq -n --arg h "$S/codex-home-d" '{home:$h}' > "$SWAPKIN_DIR/providers/codex/side/codex.json"
+echo work > "$SWAPKIN_DIR/providers/codex/active"
+MARK="$SWAPKIN_DIR/providers/codex/reload-pending"
+sleep 60 & DPID=$!; sleep 60 & OPID=$!
+echo "{\"pid\":$DPID}" > "$HOME/.codex/app-server-daemon/daemon.pid"
+export SWAPKIN_CODEX_POLL=0.2
+SWAPKIN_CODEX_PIDS="$OPID" PATH="$S/bin:$PATH" sk "$SWAPKIN" -p codex use side >/dev/null
+sleep 0.6
+assert_true test -f "$MARK"
+assert_true test ! -e "$S/restart.log"
+assert_eq "one waiter running" "1" "$(pgrep -fc "$MARK.waiter" || true)"
+SWAPKIN_CODEX_PIDS="$OPID" PATH="$S/bin:$PATH" sk "$SWAPKIN" -p codex use work >/dev/null
+sleep 0.5
+assert_eq "second switch starts no second waiter" "1" "$(pgrep -fc "$MARK.waiter" || true)"
+kill $OPID; wait $OPID 2>/dev/null
+for _ in 1 2 3 4 5 6 7 8 9 10; do [[ -e $S/restart.log ]] && break; sleep 0.3; done
+assert_contains "waiter restarted the daemon on close" "$(cat "$S/restart.log" 2>/dev/null)" "app-server daemon restart"
+sleep 0.3
+assert_true test ! -e "$MARK"
+assert_eq "waiter exited" "0" "$(pgrep -fc "$MARK.waiter" || true)"
+unset SWAPKIN_CODEX_POLL
+kill $DPID 2>/dev/null
+
+echo "2c3. session count ignores the app-server daemon and its helpers"
+S=$(sandbox)
+export HOME="$S/home" SWAPKIN_DIR="$S/data"; unset CODEX_HOME
+mkdir -p "$S/bin"; cp "$(command -v sleep)" "$S/bin/codex"
+count() { bash -c 'source "$1"; codex_open_sessions' _ "$ROOT/bin/providers/codex.sh" 2>/dev/null; }
+base=$(count)
+(exec -a "codex app-server --listen x" "$S/bin/codex" 31) & H1=$!
+(exec -a "codex app-server daemon helper" "$S/bin/codex" 32) & H2=$!
+(exec -a "codex" "$S/bin/codex" 33) & T1=$!
+sleep 0.3
+assert_contains "daemon and helpers not counted, one TUI is" "$(( $(count) - base ))" "1"
+kill $H1 $H2 $T1 2>/dev/null
+
+echo "2d. first account on the live home keeps its own login after a switch"
+S=$(sandbox)
+export HOME="$S/home" SWAPKIN_DIR="$S/data"; unset CODEX_HOME
+mkdir -p "$HOME/.codex" "$S/b" "$SWAPKIN_DIR/providers/codex/work" "$SWAPKIN_DIR/providers/codex/other"
+echo '{"tokens":{"account_id":"acct-work","id_token":"w"}}' > "$HOME/.codex/auth.json"
+echo '{"tokens":{"account_id":"acct-other","id_token":"o"}}' > "$S/b/auth.json"
+jq -n --arg h "$HOME/.codex" '{home:$h}' > "$SWAPKIN_DIR/providers/codex/work/codex.json"
+jq -n --arg h "$S/b" '{home:$h}' > "$SWAPKIN_DIR/providers/codex/other/codex.json"
+echo work > "$SWAPKIN_DIR/providers/codex/active"
+sk "$SWAPKIN" -p codex use other >/dev/null
+wh=$(jq -r .home "$SWAPKIN_DIR/providers/codex/work/codex.json")
+assert_true test "$wh" != "$HOME/.codex"
+assert_contains "work's home holds work's login" "$(cat "$wh/auth.json")" "acct-work"
+assert_contains "live slot holds other's login" "$(cat "$HOME/.codex/auth.json")" "acct-other"
+sk "$SWAPKIN" -p codex use work >/dev/null
+assert_eq "env codex for work gives its own home" "export CODEX_HOME=$wh" "$(sk "$SWAPKIN" env codex)"
+assert_contains "live slot back to work's login" "$(cat "$HOME/.codex/auth.json")" "acct-work"
+
+echo "2c. install-cli"
+S=$(sandbox)
+export HOME="$S/home"; mkdir -p "$HOME"
+out=$(sk "$SWAPKIN" install-cli)
+assert_eq "link points at this script" "$SWAPKIN" "$(readlink "$HOME/.local/bin/swapkin")"
+sk "$SWAPKIN" install-cli >/dev/null
+assert_eq "second run is idempotent" "$SWAPKIN" "$(readlink "$HOME/.local/bin/swapkin")"
+ln -sfn /nonexistent "$HOME/.local/bin/swapkin"
+sk "$SWAPKIN" install-cli >/dev/null
+assert_eq "an old symlink is replaced" "$SWAPKIN" "$(readlink "$HOME/.local/bin/swapkin")"
+rm "$HOME/.local/bin/swapkin"; echo mine > "$HOME/.local/bin/swapkin"
+out=$(sk "$SWAPKIN" install-cli || true)
+assert_contains "a real file is refused" "$out" "real file"
+assert_eq "a real file is left alone" "mine" "$(cat "$HOME/.local/bin/swapkin")"
 
 # ==================================================== 3. codex probe: new + old fields ==
 echo "3. codex probe parses a rollout fixture (new and old reset fields)"
@@ -1020,6 +1188,47 @@ svc=$(cat "$ROOT/Service.qml")
 assert_contains "Service logs a run skipped for a running one" "$svc" "previous check still running"
 assert_contains "Service restarts a stuck run" "$svc" "watchProcess.running = false"
 assert_contains "Service starts after an unanswered read" "$svc" "id: loadGuard"
+
+echo "22. codex add of a second account never touches the first one's login or the live login"
+for style in live-home login-hits-live; do
+  S=$(sandbox)
+  export HOME="$S/home" SWAPKIN_DIR="$S/data" XDG_CONFIG_HOME="$S/config" \
+         XDG_STATE_HOME="$S/state" XDG_CACHE_HOME="$S/cache" PATH="$STUBS:$PATH"
+  unset CODEX_HOME
+  mkdir -p "$HOME/.codex" "$SWAPKIN_DIR/providers/codex/main"
+  echo '{"tokens":{"account_id":"acct-old","id_token":"o"}}' > "$HOME/.codex/auth.json"
+  echo 'model = "x"' > "$HOME/.codex/config.toml"
+  jq -n '{colour:"#7fa7d9"}' > "$SWAPKIN_DIR/providers/codex/main/meta.json"
+  jq -n --arg h "$HOME/.codex" '{home:$h}' > "$SWAPKIN_DIR/providers/codex/main/codex.json"
+  echo main > "$SWAPKIN_DIR/providers/codex/active"
+  mk_stub codex "
+case \"\$1 \$2\" in
+  'login status') echo 'Logged in using ChatGPT'; exit 0 ;;
+  login*) echo '{\"tokens\":{\"account_id\":\"acct-new\",\"id_token\":\"n\"}}' > \"\${CODEX_HOME:-\$HOME/.codex}/auth.json\" ;;
+esac
+"
+  if [[ $style == login-hits-live ]]; then
+    mk_stub codex "
+case \"\$1 \$2\" in
+  'login status') echo 'Logged in using ChatGPT'; exit 0 ;;
+  login*) echo '{\"tokens\":{\"account_id\":\"acct-new\",\"id_token\":\"n\"}}' > \"\$HOME/.codex/auth.json\" ;;
+esac
+"
+  fi
+  sk "$SWAPKIN" -p codex add main1 >/dev/null
+  assert_contains "[$style] live login unchanged by add" "$(cat "$HOME/.codex/auth.json")" "acct-old"
+  assert_eq "[$style] active pointer unchanged by add" "main" "$(cat "$SWAPKIN_DIR/providers/codex/active")"
+  sk "$SWAPKIN" -p codex use main1 >/dev/null
+  assert_contains "[$style] live is main1's login after use" "$(cat "$HOME/.codex/auth.json")" "acct-new"
+  sk "$SWAPKIN" -p codex use main >/dev/null
+  assert_contains "[$style] live is main's login after switching back" "$(cat "$HOME/.codex/auth.json")" "acct-old"
+  for f in "$SWAPKIN_DIR/providers/codex/main/auth.json" "$(jq -r .home "$SWAPKIN_DIR/providers/codex/main/codex.json")/auth.json"; do
+    [[ -f $f ]] && assert_contains "[$style] main holds main's login" "$(cat "$f")" "acct-old"
+  done
+  for f in "$SWAPKIN_DIR/providers/codex/main1/auth.json" "$(jq -r .home "$SWAPKIN_DIR/providers/codex/main1/codex.json")/auth.json"; do
+    [[ -f $f ]] && assert_contains "[$style] main1 holds main1's login" "$(cat "$f")" "acct-new"
+  done
+done
 
 echo "shipped demo data"
 shipped=$(SWAPKIN_DEMO=1 SWAPKIN_DEMO_FILE= "$ROOT/bin/swapkin" providers --json 2>&1 || true)

@@ -352,6 +352,7 @@ usage_of() { # dir
 }
 
 cmd_list() { # --json or empty
+  declare -F p_housekeeping >/dev/null && p_housekeeping
   local cur; cur=$(active)
   if [[ "${1:-}" == --json ]]; then
     local name rows=()
@@ -381,6 +382,9 @@ provider_entry_json() { # id
     load_adapter "$id" || exit 0
     local installed=false
     if declare -F p_installed >/dev/null && p_installed 2>/dev/null; then installed=true; fi
+    declare -F p_housekeeping >/dev/null && p_housekeeping
+    local reload_pending=""
+    declare -F codex_pending_old >/dev/null && reload_pending=$(codex_pending_old)
     local has_accounts=""
     has_accounts=$(profiles | head -1)
     # Listed when swapkin saved an account, or the provider's own CLI is logged
@@ -431,9 +435,9 @@ provider_entry_json() { # id
 
     jq -n --arg id "$P_ID" --arg name "$P_NAME" --arg mode "$P_MODE" --arg modeLabel "$mode_label" \
       --arg modeWords "$mode_words" --arg store "$P_STORE" --arg how "$P_HOW" --arg addHint "$P_ADD_HINT" \
-      --argjson installed "$installed" --argjson signedIn "$signed_in" --argjson rateLimited "$rate_limited" --argjson rateLimitedUntilMs "$until_ms" --argjson sessions "$sessions" --argjson accounts "$accounts" \
+      --argjson installed "$installed" --argjson signedIn "$signed_in" --argjson rateLimited "$rate_limited" --argjson rateLimitedUntilMs "$until_ms" --arg reloadPending "$reload_pending" --argjson sessions "$sessions" --argjson accounts "$accounts" \
       '{id:$id, signedIn:$signedIn, rateLimited:$rateLimited, rateLimitedUntilMs:$rateLimitedUntilMs, name:$name, mode:$mode, modeLabel:$modeLabel, modeWords:$modeWords, store:$store, how:$how,
-        addHint:$addHint, installed:$installed, sessions:$sessions, accounts:$accounts}'
+        addHint:$addHint, installed:$installed, sessions:$sessions, reloadPending:$reloadPending, accounts:$accounts}'
   )
 }
 
@@ -532,6 +536,7 @@ Usage: swapkin [-p|--provider ID] <command>
   statusline      The active account, coloured, for a status line
   providers --json
                   Every provider with a saved account or its own CLI login, as JSON
+  install-cli     Link ~/.local/bin/swapkin to this copy (replaces only a symlink)
   env [id]        export KEY=value lines for a cold provider's active account
   run <id> [-- args]
                   Exec that provider's CLI with its active account's env
@@ -595,7 +600,7 @@ case "$cmd" in
            # short-circuit: copilot's use must always run gh auth switch
            # (idempotent), since the stored pointer can disagree with gh's
            # real active login (M9).
-           if [[ ${P_ALWAYS_SWITCH:-0} != 1 && $(active) == "$2" ]]; then echo "Already on $2"; else p_use "$2"; fi ;;
+           if [[ ${P_ALWAYS_SWITCH:-0} != 1 && $(active) == "$2" ]]; then echo "Already on $2"; declare -F p_housekeeping >/dev/null && p_housekeeping; else p_use "$2"; fi ;;
       add) declare -F p_add >/dev/null || die "add is not supported for $provider"; p_add "${2:-}" "${3:-}" ;;
       colour|color) set_colour "${2:?usage: swapkin colour <name> <#rrggbb>}" "${3:?usage: swapkin colour <name> <#rrggbb>}" ;;
       remove) cmd_remove "${2:?usage: swapkin remove <name>}" ;;
@@ -622,7 +627,11 @@ case "$cmd" in
     fi ;;
   check)
     load_adapter claude
-    claude_check ;;
+    claude_check
+    # Finish a Codex daemon restart that was waiting for the last session to close.
+    # The Claude adapter is done first: loading the Codex adapter replaces p_use and friends.
+    load_adapter codex
+    declare -F p_housekeeping >/dev/null && p_housekeeping ;;
   note)  # one line in the watchdog log, written by the shell side of the watchdog
     load_adapter claude
     auto_log "${2:-}" ;;
@@ -635,6 +644,13 @@ case "$cmd" in
   providers)
     [[ ${2:-} == --json ]] || { help >&2; exit 2; }
     cmd_providers_json ;;
+  install-cli)
+    dest="$HOME/.local/bin/swapkin"; target="$SCRIPT_DIR/swapkin"
+    mkdir -p "$HOME/.local/bin"
+    if [[ -e $dest && ! -L $dest ]]; then die "$dest is a real file; not touching it"; fi
+    ln -sfn "$target" "$dest"
+    echo "Linked $dest -> $target"
+    case ":$PATH:" in *":$HOME/.local/bin:"*) ;; *) echo "Add $HOME/.local/bin to your PATH." ;; esac ;;
   env) cmd_env "${2:-}" ;;
   run)
     shift || true

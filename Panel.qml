@@ -1458,6 +1458,17 @@ Panel {
               }
 
               Text {
+                visible: !root.settingsOpen && root.hasAccounts && root.provider && root.provider.reloadPending !== ""
+                width: parent.width
+                wrapMode: Text.WordWrap
+                textFormat: Text.PlainText
+                text: root.provider ? "Close Codex to finish the switch: it still uses " + root.provider.reloadPending + "." : ""
+                color: root.dim
+                font.family: root.fontFamily
+                font.pixelSize: Style.font.caption
+              }
+
+              Text {
                 visible: !root.settingsOpen && root.hasAccounts && root.provider && root.provider.sessions > 0
                 width: parent.width
                 wrapMode: Text.WordWrap
