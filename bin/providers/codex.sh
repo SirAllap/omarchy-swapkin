@@ -15,6 +15,7 @@ P_HOW="New Codex sessions use the switched account; sessions already running kee
 P_ADD_HINT="The first account is whatever CODEX_HOME is already signed into."
 
 p_installed() { [[ -n $(tool_bin codex) ]]; }
+p_has_login() { [[ -f ${CODEX_HOME:-$HOME/.codex}/auth.json || -f $HOME/.codex/auth.json ]]; }
 p_sessions() { pgrep -x codex 2>/dev/null | wc -l; }
 
 home_of() { jq -r '.home // empty' "$(account_dir "$1")/codex.json" 2>/dev/null; } # name
@@ -145,6 +146,7 @@ p_probe() { # name
     local label
     if [[ $win == 300 ]]; then label="5h window"
     elif [[ $win == 10080 ]]; then label="Weekly"
+    elif [[ $win == 43200 ]]; then label="Monthly (30-day)"
     elif (( win > 0 && win % 60 == 0 )); then label="$((win/60))h window"
     else label="${win}m window"; fi
     limits=$(jq -c --argjson limits "$limits" --arg label "$label" --argjson pct "$used_pct" --arg resets "$iso" \

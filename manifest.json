@@ -37,7 +37,13 @@
       "budgetDays": "Mon,Tue,Wed,Thu,Fri",
       "budgetStartHour": 9,
       "budgetEndHour": 19,
-      "modelsHidden": ""
+      "modelsHidden": "",
+      "alertAt": 90,
+      "heroRing": "tightest",
+      "firstProvider": "",
+      "showCost": true,
+      "motion": "system",
+      "providersHidden": ""
     },
     "schema": [
       {
@@ -127,6 +133,75 @@
         "step": 1,
         "defaultValue": 19,
         "description": "If the end is not after the start, the budget behaves like Every day."
+      },
+      {
+        "key": "autoSwitch",
+        "type": "boolean",
+        "label": "Switch automatically when an account has 5% left",
+        "defaultValue": false,
+        "description": "When an account has the percentage below or less left on any limit (5-hour session, weekly, per-model weekly), switch to the roomiest other account, exactly like pressing a in the panel. Claude only."
+      },
+      {
+        "key": "autoSwitchLeftPct",
+        "type": "integer",
+        "label": "Switch when this much is left (%)",
+        "min": 1,
+        "max": 30,
+        "step": 1,
+        "defaultValue": 5
+      },
+      {
+        "key": "autoSwitchReturn",
+        "type": "boolean",
+        "label": "Switch back when recovered",
+        "defaultValue": false,
+        "description": "Once the account you left has room again on every limit and is roomier than this one, switch back. At most once per switch."
+      },
+      {
+        "key": "alertAt",
+        "type": "integer",
+        "label": "Warn when a limit reaches (%)",
+        "min": 50,
+        "max": 95,
+        "step": 5,
+        "defaultValue": 90,
+        "description": "The watchdog notifies once when the active Claude account passes this share of its weekly limit."
+      },
+      {
+        "key": "heroRing",
+        "type": "enum",
+        "label": "Hero ring shows",
+        "options": ["tightest", "weekly", "session"],
+        "defaultValue": "tightest",
+        "description": "Which limit the big ring at the top of the panel follows."
+      },
+      {
+        "key": "firstProvider",
+        "type": "string",
+        "label": "Provider shown first",
+        "defaultValue": "",
+        "description": "Provider id the panel opens on (for example claude or codex). Empty picks the one you use most."
+      },
+      {
+        "key": "showCost",
+        "type": "boolean",
+        "label": "Show today's cost estimate",
+        "defaultValue": true
+      },
+      {
+        "key": "motion",
+        "type": "enum",
+        "label": "Motion",
+        "options": ["system", "reduce", "full"],
+        "defaultValue": "system",
+        "description": "system follows Omarchy's reduce-motion switch; reduce and full override it for Swapkin only."
+      },
+      {
+        "key": "providersHidden",
+        "type": "string",
+        "label": "Hidden providers",
+        "defaultValue": "",
+        "description": "Comma-separated provider ids to leave out of the panel, for example copilot. At least one stays visible."
       },
       {
         "key": "modelsHidden",

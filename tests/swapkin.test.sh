@@ -48,6 +48,8 @@ $2
 EOF
   chmod +x "$STUBS/$1"
 }
+# Default secret-tool finds nothing, so the real keyring never decides a test.
+mk_stub secret-tool "exit 1"
 
 sandbox() {
   local dir; dir=$(mktemp -d)
@@ -268,6 +270,34 @@ shape_ok=$(jq -e '
 ' <<<"$out" >/dev/null 2>&1 && echo yes || echo no)
 assert_eq "providers --json matches the documented shape" "yes" "$shape_ok"
 assert_contains "the claude provider with its saved account is present" "$out" '"id":"claude"'
+
+# ============================== 9b. agy (Antigravity) built-in, never mode ==
+echo "9b. agy is a built-in never-mode provider, listed only with its own login"
+S=$(sandbox)
+export HOME="$S/home" SWAPKIN_DIR="$S/data" XDG_CONFIG_HOME="$S/config" \
+       XDG_STATE_HOME="$S/state" XDG_CACHE_HOME="$S/cache" SWAPKIN_DEMO=0
+unset SWAPKIN_DEMO_FILE
+mkdir -p "$HOME/.gemini/antigravity-cli" "$S/agybin"
+echo fake > "$HOME/.gemini/antigravity-cli/antigravity-oauth-token"
+printf '#!/bin/sh\nexit 0\n' > "$S/agybin/agy"; chmod +x "$S/agybin/agy"
+# stub secret-tool: finds an item only while $S/keyring exists; prints a fake token
+printf '#!/bin/sh\n[ -f "%s/keyring" ] && { echo FAKE-TOKEN; exit 0; }\nexit 1\n' "$S" > "$S/agybin/secret-tool"
+chmod +x "$S/agybin/secret-tool"
+out=$(PATH="$S/agybin:$STUBS:$PATH" "$SWAPKIN" providers --json 2>/dev/null)
+got=$(jq -c '.providers[]|select(.id=="agy")|{id,mode,installed}' <<<"$out")
+assert_eq "agy listed as never + installed with a fake agy on PATH" '{"id":"agy","mode":"never","installed":true}' "$got"
+out=$(PATH="$STUBS:/usr/bin:/bin" "$SWAPKIN" providers --json 2>/dev/null)
+assert_eq "agy logged in (file) but no binary: installed false" "false" "$(jq -r '.providers[]|select(.id=="agy")|.installed' <<<"$out")"
+rm "$HOME/.gemini/antigravity-cli/antigravity-oauth-token"
+out=$(PATH="$S/agybin:$STUBS:$PATH" "$SWAPKIN" providers --json 2>/dev/null)
+assert_eq "agy absent when installed but not logged in" "" "$(jq -c '.providers[]|select(.id=="agy")' <<<"$out")"
+touch "$S/keyring"
+out=$(PATH="$S/agybin:$STUBS:$PATH" "$SWAPKIN" providers --json 2>/dev/null)
+assert_eq "agy listed when only the keyring item exists" '{"id":"agy","mode":"never","installed":true}' "$(jq -c '.providers[]|select(.id=="agy")|{id,mode,installed}' <<<"$out")"
+assert_not_contains "keyring token never reaches the output" "$out" "FAKE-TOKEN"
+out=$(PATH="$S/agybin:$STUBS:$PATH" "$SWAPKIN" -p agy add x 2>&1)
+assert_contains "add is not supported for agy" "$out" "add is not supported for agy"
+assert_contains "30-day Codex window is labelled Monthly" "$(cat "$ROOT/bin/providers/codex.sh")" 'win == 43200 ]]; then label="Monthly (30-day)"'
 
 # ==================================== 11. H2: remove providers / path traversal ==
 echo "11. remove providers is rejected; path traversal in remove is rejected"
@@ -594,6 +624,332 @@ else
   rm -rf "$SYNC_DIR"
 fi
 
+# ============================================== 21. auto-switch near the limit ==
+# Fake accounts under a temp SWAPKIN_DIR with hand-written usage.json files.
+# `swapkin check` is the real entry point; no omarchy-agent-usage-claude stub is
+# on PATH, so the figures are exactly what each scenario seeds.
+mk_stub notify-send '[[ -n "${NOTIFY_LOG:-}" ]] && echo "$*" >> "$NOTIFY_LOG"; true'
+
+lim() { # label fraction-used when
+  jq -nc --arg l "$1" --argjson p "$2" --arg r "$(date -u -d "$3" +%Y-%m-%dT%H:%M:%S+00:00)" \
+    '{label:$l,percent:$p,resetsAt:$r}'
+}
+SESSION="Session (5-hour)"; WEEKLY="Weekly (7-day)"; FABLE="Fable Weekly"
+auto_account() { # name token-char
+  mkdir -p "$SWAPKIN_DIR/$1"
+  echo '{"refreshToken":"'"$(printf "$2%.0s" {1..40})"'","subscriptionType":"max"}' > "$SWAPKIN_DIR/$1/oauth.json"
+  echo '{}' > "$SWAPKIN_DIR/$1/account.json"
+  jq -n '{colour:"#7fa7d9"}' > "$SWAPKIN_DIR/$1/meta.json"
+}
+auto_usage() { # name limit-json...
+  local name="$1"; shift
+  printf '%s\n' "$@" | jq -sc '{limits:.}' > "$SWAPKIN_DIR/$name/usage.json"
+}
+auto_world() { # config-json ; builds personal (active) + work
+  S=$(sandbox)
+  export HOME="$S/home" SWAPKIN_DIR="$S/data" CLAUDE_CONFIG_DIR="$S/home/.claude" \
+         XDG_CONFIG_HOME="$S/config" XDG_STATE_HOME="$S/state" XDG_CACHE_HOME="$S/cache" \
+         PATH="$STUBS:$PATH" SWAPKIN_DEMO=0 NOTIFY_LOG="$S/notify.log"
+  unset SWAPKIN_AUTOSWITCH SWAPKIN_AUTOSWITCHLEFTPCT SWAPKIN_AUTOSWITCHRETURN
+  mkdir -p "$CLAUDE_CONFIG_DIR"
+  jq -n '{claudeAiOauth:{refreshToken:"'"$(printf 'p%.0s' {1..40})"'", subscriptionType:"max"}}' > "$CLAUDE_CONFIG_DIR/.credentials.json"
+  jq -n '{theme:"dark"}' > "$CLAUDE_CONFIG_DIR/.claude.json"
+  auto_account personal p
+  auto_account work w
+  echo personal > "$SWAPKIN_DIR/active"
+  echo "$1" > "$SWAPKIN_DIR/config.json"
+  : > "$NOTIFY_LOG"
+}
+healthy() { auto_usage "$1" "$(lim "$SESSION" 0.20 '+3 hours')" "$(lim "$WEEKLY" 0.30 '+3 days')" "$(lim "$FABLE" 0.10 '+3 days')"; }
+active_is() { cat "$SWAPKIN_DIR/active"; }
+AUTOLOG() { echo "$XDG_STATE_HOME/swapkin/autoswitch.log"; }
+# Pretend every window the watchdog remembered has now reset.
+windows_reset() {
+  jq '(.. | numbers) |= (if . > 1000000000 then 1 else . end)' "$SWAPKIN_DIR/watch.json" > "$SWAPKIN_DIR/watch.json.new" \
+    && mv "$SWAPKIN_DIR/watch.json.new" "$SWAPKIN_DIR/watch.json"
+}
+LOW_SESSION() { auto_usage "$1" "$(lim "$SESSION" "${2:-0.97}" '+2 hours')" "$(lim "$WEEKLY" 0.30 '+3 days')"; }
+
+echo "21a. each limit triggers a switch; the roomy account takes over"
+for which in session weekly fable; do
+  auto_world '{"autoSwitch":true}'
+  healthy work
+  case $which in
+    session) LOW_SESSION personal 0.96 ;;
+    weekly)  auto_usage personal "$(lim "$SESSION" 0.20 '+2 hours')" "$(lim "$WEEKLY" 0.97 '+3 days')" ;;
+    fable)   auto_usage personal "$(lim "$SESSION" 0.20 '+2 hours')" "$(lim "$WEEKLY" 0.30 '+3 days')" "$(lim "$FABLE" 0.98 '+3 days')" ;;
+  esac
+  sk "$SWAPKIN" check >/dev/null
+  assert_eq "$which limit nearly spent: switches to work" work "$(active_is)"
+  assert_contains "$which: the notification says where it went" "$(cat "$NOTIFY_LOG")" "Switched to work"
+  assert_contains "$which: the log records the switch" "$(cat "$(AUTOLOG)")" "switched personal -> work"
+done
+
+echo "21b. the threshold is inclusive, configurable, and off means off"
+auto_world '{"autoSwitch":true}'; healthy work; LOW_SESSION personal 0.95
+sk "$SWAPKIN" check >/dev/null
+assert_eq "exactly 5% left switches (default threshold)" work "$(active_is)"
+auto_world '{"autoSwitch":true}'; healthy work; LOW_SESSION personal 0.94
+sk "$SWAPKIN" check >/dev/null
+assert_eq "6% left stays put" personal "$(active_is)"
+auto_world '{"autoSwitch":true,"autoSwitchLeftPct":10}'; healthy work; LOW_SESSION personal 0.92
+sk "$SWAPKIN" check >/dev/null
+assert_eq "autoSwitchLeftPct 10 switches at 8% left" work "$(active_is)"
+auto_world '{"autoSwitch":false}'; healthy work; LOW_SESSION personal 0.99
+sk "$SWAPKIN" check >/dev/null
+assert_eq "autoSwitch off never switches" personal "$(active_is)"
+auto_world '{"autoSwitch":false}'; healthy work; LOW_SESSION personal 0.99
+SWAPKIN_AUTOSWITCH=true sk "$SWAPKIN" check >/dev/null
+assert_eq "the widget setting (env) beats config.json" work "$(active_is)"
+
+echo "21b2. the log says why nothing switched, and an env-only setting switches"
+auto_world '{}'; healthy work; LOW_SESSION personal 0.96
+sk "$SWAPKIN" check >/dev/null
+assert_eq "no config, no env: stays put" personal "$(active_is)"
+assert_contains "off is logged, not silent" "$(cat "$(AUTOLOG)")" "auto-switch is off"
+auto_world '{}'; healthy work; LOW_SESSION personal 0.50
+SWAPKIN_AUTOSWITCH=true SWAPKIN_AUTOSWITCHLEFTPCT=1 sk "$SWAPKIN" check >/dev/null
+assert_eq "above the threshold: stays put" personal "$(active_is)"
+assert_contains "threshold not reached is logged" "$(cat "$(AUTOLOG)")" "above the 1% threshold"
+auto_world '{}'; healthy work; LOW_SESSION personal 0.50
+SWAPKIN_AUTOSWITCH=true SWAPKIN_AUTOSWITCHLEFTPCT=55 sk "$SWAPKIN" check >/dev/null
+assert_eq "env only (no config.json): left 50% <= 55% switches" work "$(active_is)"
+assert_contains "the switch is logged" "$(cat "$(AUTOLOG)")" "switched personal -> work"
+
+echo "21c. no target: stay, warn once"
+auto_world '{"autoSwitch":true}'
+LOW_SESSION personal 0.97; LOW_SESSION work 0.97
+sk "$SWAPKIN" check >/dev/null; sk "$SWAPKIN" check >/dev/null
+assert_eq "both low: no switch" personal "$(active_is)"
+assert_eq "the warning goes out once" 1 "$(grep -c 'No other account has room' "$NOTIFY_LOG")"
+
+echo "21d. a target that is low on any one limit is never chosen"
+auto_world '{"autoSwitch":true}'
+LOW_SESSION personal 0.99
+auto_usage work "$(lim "$SESSION" 0.10 '+2 hours')" "$(lim "$WEEKLY" 0.10 '+3 days')" "$(lim "$FABLE" 0.96 '+3 days')"
+sk "$SWAPKIN" check >/dev/null
+assert_eq "work is roomy on weekly but spent on Fable: stay" personal "$(active_is)"
+assert_contains "and the owner is told" "$(cat "$NOTIFY_LOG")" "No other account has room"
+
+echo "21e. no ping-pong: one switch per window, the source is not a target until it resets"
+auto_world '{"autoSwitch":true}'; healthy work; LOW_SESSION personal
+sk "$SWAPKIN" check >/dev/null
+assert_eq "first switch lands" work "$(active_is)"
+# work now runs low and personal looks healthy again, but its window has not reset
+healthy personal; LOW_SESSION work
+sk "$SWAPKIN" check >/dev/null
+assert_eq "the account we left is not a target before its reset" work "$(active_is)"
+# the owner goes back by hand while the old window is still open
+sk "$SWAPKIN" use personal >/dev/null
+LOW_SESSION personal; healthy work
+sk "$SWAPKIN" check >/dev/null
+assert_eq "the same window never triggers a second switch" personal "$(active_is)"
+assert_eq "one 'Switched to' notification in all" 1 "$(grep -c 'Switched to' "$NOTIFY_LOG")"
+# the window resets: the stored block expires and the account can be used again
+windows_reset
+auto_usage personal "$(lim "$SESSION" 0.97 '+9 hours')" "$(lim "$WEEKLY" 0.30 '+3 days')"
+sk "$SWAPKIN" check >/dev/null
+assert_eq "a new window can switch again" work "$(active_is)"
+
+echo "21f. a session-limit switch does not return by itself unless autoSwitchReturn is on"
+for ret in false true; do
+  auto_world '{"autoSwitch":true,"autoSwitchReturn":'$ret'}'
+  healthy work; LOW_SESSION personal
+  sk "$SWAPKIN" check >/dev/null
+  # personal's session resets; work has been in use and is now the fuller one
+  windows_reset
+  healthy personal
+  auto_usage work "$(lim "$SESSION" 0.60 '+2 hours')" "$(lim "$WEEKLY" 0.70 '+3 days')"
+  sk "$SWAPKIN" check >/dev/null
+  if [[ $ret == true ]]; then
+    assert_eq "return on: back to the original once it recovered and is roomier" personal "$(active_is)"
+    sk "$SWAPKIN" use work >/dev/null
+    sk "$SWAPKIN" check >/dev/null
+    assert_eq "return happens at most once per switch" work "$(active_is)"
+  else
+    assert_eq "return off: stays on the account it moved to" work "$(active_is)"
+  fi
+done
+auto_world '{"autoSwitch":true,"autoSwitchReturn":true}'
+healthy work; LOW_SESSION personal
+sk "$SWAPKIN" check >/dev/null
+windows_reset
+auto_usage personal "$(lim "$SESSION" 0.50 '+2 hours')" "$(lim "$WEEKLY" 0.97 '+3 days')"
+sk "$SWAPKIN" check >/dev/null
+assert_eq "return on: not while the original is still low on another limit" work "$(active_is)"
+
+echo "21g. stale, unreadable or missing figures do nothing"
+auto_world '{"autoSwitch":true}'; healthy work; LOW_SESSION personal 0.99
+touch -d '3 hours ago' "$SWAPKIN_DIR/personal/usage.json"
+sk "$SWAPKIN" check >/dev/null
+assert_eq "stale figures for the active account: no switch" personal "$(active_is)"
+assert_contains "the log says why" "$(cat "$(AUTOLOG)")" "stale"
+auto_world '{"autoSwitch":true}'; healthy work
+echo 'not json' > "$SWAPKIN_DIR/personal/usage.json"
+sk "$SWAPKIN" check >/dev/null
+assert_eq "unreadable figures: no switch" personal "$(active_is)"
+auto_world '{"autoSwitch":true}'; healthy work; LOW_SESSION personal 0.99
+touch -d '3 hours ago' "$SWAPKIN_DIR/work/usage.json"
+sk "$SWAPKIN" check >/dev/null
+assert_eq "stale figures for the target: no switch" personal "$(active_is)"
+auto_world '{"autoSwitch":true}'; healthy work; LOW_SESSION personal 0.99
+echo '{"refreshToken":"short","subscriptionType":"max"}' > "$SWAPKIN_DIR/work/oauth.json"
+sk "$SWAPKIN" check >/dev/null
+assert_eq "a target without a real login: no switch" personal "$(active_is)"
+
+echo "21h. the decision log keeps the last 200 lines"
+auto_world '{"autoSwitch":true}'
+mkdir -p "$(dirname "$(AUTOLOG)")"
+for i in $(seq 1 300); do echo "old line $i" >> "$(AUTOLOG)"; done
+healthy work; LOW_SESSION personal 0.99
+sk "$SWAPKIN" check >/dev/null
+assert_eq "log trimmed to 200 lines" 200 "$(wc -l < "$(AUTOLOG)")"
+assert_contains "newest line is the switch" "$(tail -1 "$(AUTOLOG)")" "switched personal -> work"
+
+# ============= 23. visibility: saved account or the CLI's own login, not gh ==
+echo "23. gh alone does not list Copilot; a Codex CLI login with zero accounts does"
+S=$(sandbox)
+export HOME="$S/home" SWAPKIN_DIR="$S/data" XDG_CONFIG_HOME="$S/config" \
+       XDG_STATE_HOME="$S/state" XDG_CACHE_HOME="$S/cache" PATH="$STUBS:$PATH" SWAPKIN_DEMO=0
+unset SWAPKIN_DEMO_FILE SWAPKIN_PROVIDER
+# gh is installed (on PATH), but no account has been saved in swapkin yet.
+mk_stub gh "case \"\$1 \$2\" in 'auth status') cat '$FIXTURES/gh-auth-status.json' ;; esac"
+
+out=$(sk "$SWAPKIN" providers --json)
+assert_not_contains "installed copilot with zero accounts is not listed" "$out" '"id":"copilot"'
+assert_eq "no provider is listed with no account and no CLI login" 0 "$(jq '.providers | length' <<<"$out")"
+
+# Codex has zero saved accounts too, but is logged in at ~/.codex/auth.json.
+mkdir -p "$HOME/.codex"
+echo '{"tokens":{"id_token":"fixture"}}' > "$HOME/.codex/auth.json"
+out=$(sk "$SWAPKIN" providers --json)
+assert_contains "logged-in codex with zero saved accounts is listed" "$out" '"id":"codex"'
+assert_eq "codex has no saved accounts in the listing" 0 \
+  "$(jq '.providers[] | select(.id == "codex") | .accounts | length' <<<"$out")"
+assert_not_contains "a gh login still does not list copilot" "$out" '"id":"copilot"'
+
+# The first account still comes from `swapkin -p copilot add` and makes it appear.
+out=$(sk "$SWAPKIN" -p copilot add work)
+assert_contains "copilot add still works with no saved accounts" "$out" "Saved 'work'"
+out=$(sk "$SWAPKIN" providers --json)
+assert_contains "copilot is listed once it has a saved account" "$out" '"id":"copilot"'
+assert_eq "the saved account is in the listing" 1 "$(jq '[.providers[] | select(.id == "copilot") | .accounts[]] | length' <<<"$out")"
+
+# ============================ 24. Claude plan label comes from the API =======
+echo "24. Claude's label is the API's plan name, not a mapped rate-limit tier"
+S=$(sandbox)
+export HOME="$S/home" SWAPKIN_DIR="$S/data" CLAUDE_CONFIG_DIR="$S/home/.claude" \
+       XDG_CONFIG_HOME="$S/config" XDG_STATE_HOME="$S/state" XDG_CACHE_HOME="$S/cache" \
+       PATH="$STUBS:$PATH" SWAPKIN_DEMO=0
+unset SWAPKIN_DEMO_FILE
+
+# The limits tool reports the tier-derived name; the API profile says Ultra.
+mk_stub omarchy-agent-usage-claude 'echo "{\"limits\":[{\"label\":\"Weekly\",\"percent\":0.2}],\"tierLabel\":\"Max 20x\",\"updatedAt\":\"2026-11-21T12:00:00Z\"}"'
+
+mkdir -p "$CLAUDE_CONFIG_DIR" "$SWAPKIN_DIR/work" "$SWAPKIN_DIR/personal" "$SWAPKIN_DIR/raw"
+jq -n --arg t "$(printf 'x%.0s' {1..40})" '{claudeAiOauth:{refreshToken:$t, subscriptionType:"max"}}' > "$CLAUDE_CONFIG_DIR/.credentials.json"
+jq -c . "$FIXTURES/claude-account.json" > "$CLAUDE_CONFIG_DIR/.claude.json"
+
+for acct in work personal raw; do
+  case "$acct" in
+    work) letter=x; plan=max ;;
+    personal) letter=y; plan=pro ;;
+    raw) letter=z; plan=team ;;
+  esac
+  jq -n --arg t "$(printf "$letter%.0s" {1..40})" --arg p "$plan" \
+    '{refreshToken:$t, subscriptionType:$p}' > "$SWAPKIN_DIR/$acct/oauth.json"
+  jq -n --arg c '#7fa7d9' '{colour:$c}' > "$SWAPKIN_DIR/$acct/meta.json"
+done
+jq '.oauthAccount.planDisplayName = "Claude Pro"' "$FIXTURES/claude-account.json" > "$SWAPKIN_DIR/personal/account.json"
+echo '{}' > "$SWAPKIN_DIR/raw/account.json"
+echo work > "$SWAPKIN_DIR/active"
+
+sk "$SWAPKIN" -p claude usage >/dev/null
+assert_eq "active account takes the API profile's plan name" "Ultra" "$(jq -r .tierLabel "$SWAPKIN_DIR/work/usage.json")"
+assert_eq "idle account takes its own API plan name verbatim" "Claude Pro" "$(jq -r .tierLabel "$SWAPKIN_DIR/personal/usage.json")"
+assert_eq "without an API name the raw credential value is kept" "team" "$(jq -r .tierLabel "$SWAPKIN_DIR/raw/usage.json")"
+
+out=$(sk "$SWAPKIN" providers --json)
+assert_eq "panel tierLabel for the active account" "Ultra" "$(jq -r '.providers[] | select(.id=="claude") | .accounts[] | select(.name=="work") | .tierLabel' <<<"$out")"
+assert_eq "plan field for an idle account" "Claude Pro" "$(jq -r '.providers[] | select(.id=="claude") | .accounts[] | select(.name=="personal") | .plan' <<<"$out")"
+assert_eq "plan field falls back to the raw value" "team" "$(jq -r '.providers[] | select(.id=="claude") | .accounts[] | select(.name=="raw") | .plan' <<<"$out")"
+assert_not_contains "no tier-derived plan name reaches the panel" "$out" "Max 20x"
+assert_eq "active account's plan field is the API name the panel header reads" "Ultra" "$(jq -r '.providers[] | select(.id=="claude") | .accounts[] | select(.active) | .plan' <<<"$out")"
+assert_contains "Main.qml prefers the active account's plan over the record's tierLabel" "$(grep 'tierLabel: activePlanName' "$ROOT/Main.qml")" "|| String(record.tierLabel"
+rm -f "$STUBS/omarchy-agent-usage-claude"
+
+# Right after a switch ~/.claude.json still holds the previous account's profile:
+# the account's own saved account.json wins, and the live file counts only for the
+# same login.
+jq '.oauthAccount.planDisplayName = "Claude Pro" | .oauthAccount.accountUuid = "uuid-personal"' "$FIXTURES/claude-account.json" > "$SWAPKIN_DIR/personal/account.json"
+echo personal > "$SWAPKIN_DIR/active"
+out=$(sk "$SWAPKIN" providers --json)
+assert_eq "stale ~/.claude.json plan is not shown for the new active account" "Claude Pro" "$(jq -r '.providers[] | select(.id=="claude") | .accounts[] | select(.active) | .plan' <<<"$out")"
+echo '{"oauthAccount":{"planDisplayName":"Claude Pro","accountUuid":"uuid-personal"}}' > "$SWAPKIN_DIR/personal/account.json"
+assert_eq "active account reads its own account.json first" "Claude Pro" "$(sk "$SWAPKIN" providers --json | jq -r '.providers[] | select(.id=="claude") | .accounts[] | select(.name=="personal") | .plan')"
+echo '{"oauthAccount":{"accountUuid":"uuid-other"}}' > "$SWAPKIN_DIR/personal/account.json"
+assert_eq "live profile of another login is not trusted; credential value used" "pro" "$(sk "$SWAPKIN" providers --json | jq -r '.providers[] | select(.id=="claude") | .accounts[] | select(.name=="personal") | .plan')"
+echo work > "$SWAPKIN_DIR/active"
+
+# One service run = one log line; a repeat bumps a count, a changed setting logs anew.
+LOGF="$XDG_STATE_HOME/swapkin/autoswitch.log"; rm -f "$LOGF"
+sk env SWAPKIN_AUTOSWITCH=false "$SWAPKIN" check >/dev/null
+sk env SWAPKIN_AUTOSWITCH=false "$SWAPKIN" check >/dev/null
+assert_contains "repeated runs collapse into a counted line" "$(cat "$LOGF")" "(x2)"
+sk env SWAPKIN_AUTOSWITCH=false SWAPKIN_AUTOSWITCHLEFTPCT=9 "$SWAPKIN" check >/dev/null
+assert_contains "a changed setting leaves its own line" "$(cat "$LOGF")" "leftPct=9"
+assert_contains "the first setting line is still there" "$(cat "$LOGF")" "leftPct=5"
+
+# Service.qml re-reads shell.json before each pass and never gates the timer on that read.
+assert_contains "Service.qml reloads shell.json per pass" "$(cat "$ROOT/Service.qml")" "shellFile.reload()"
+assert_not_contains "Service.qml timer not gated on fileSettled" "$(cat "$ROOT/Service.qml")" "fileSettled"
+
+# ============================== 25. label: a display name, and signedIn ======
+echo "25. label shows an account under another name; providers --json says signedIn"
+SB=$(sandbox)
+export HOME="$SB/home" SWAPKIN_DIR="$SB/data" XDG_DATA_HOME="$SB/data-xdg" XDG_CONFIG_HOME="$SB/config"
+mkdir -p "$SWAPKIN_DIR/work" "$HOME/.claude"
+echo work > "$SWAPKIN_DIR/active"
+echo '{}' > "$SWAPKIN_DIR/work/oauth.json"
+echo '{}' > "$HOME/.claude/.credentials.json"
+sk "$SWAPKIN" -p claude label work "Day job" >/dev/null
+assert_eq "label is stored beside the account, the id stays" "Day job" "$(cat "$SWAPKIN_DIR/work/label")"
+out=$(sk "$SWAPKIN" providers --json)
+assert_eq "providers --json carries the label" "Day job" "$(jq -r '.providers[] | select(.id=="claude") | .accounts[0].label' <<<"$out")"
+assert_eq "the account name is untouched" "work" "$(jq -r '.providers[] | select(.id=="claude") | .accounts[0].name' <<<"$out")"
+assert_eq "a signed-in CLI reports signedIn" "true" "$(jq -r '.providers[] | select(.id=="claude") | .signedIn' <<<"$out")"
+sk "$SWAPKIN" -p claude label work "" >/dev/null
+assert_true test ! -e "$SWAPKIN_DIR/work/label"
+res=$(sk "$SWAPKIN" -p claude label nobody x || true)
+assert_contains "label on an unknown account fails" "$res" "no account named"
+
+# ================================== 26. rate-limited probe is remembered ======
+echo "26. a rate limited usage probe is reported as rateLimited, not as a sign-out"
+SB=$(sandbox)
+export HOME="$SB/home" SWAPKIN_DIR="$SB/data" XDG_DATA_HOME="$SB/data-xdg" XDG_CONFIG_HOME="$SB/config"
+mkdir -p "$SWAPKIN_DIR/work" "$HOME/.claude"
+echo work > "$SWAPKIN_DIR/active"
+echo '{"accessToken":"x","refreshToken":"y","expiresAt":9999999999999}' > "$SWAPKIN_DIR/work/oauth.json"
+echo '{}' > "$HOME/.claude/.credentials.json"
+mk_stub omarchy-agent-usage-claude 'echo "{\"limits\":[{\"label\":\"Weekly\",\"percent\":0.2}],\"authHelpText\":\"Anthropic usage endpoint is rate limiting checks right now.\"}"'
+PATH="$STUBS:$PATH" sk "$SWAPKIN" -p claude usage >/dev/null
+assert_true test -s "$SWAPKIN_DIR/work/ratelimit"
+out=$(sk "$SWAPKIN" providers --json)
+assert_eq "providers --json says rateLimited" "true" "$(jq -r '.providers[] | select(.id=="claude") | .rateLimited' <<<"$out")"
+assert_true test ! -e "$SWAPKIN_DIR/work/usage.json"   # estimates never replace the last real figures
+mk_stub omarchy-agent-usage-claude 'echo "{\"limits\":[{\"label\":\"Weekly\",\"percent\":0.2}],\"authHelpText\":\"Anthropic usage endpoint is rate limiting checks right now (retry after 1200s).\"}"'
+PATH="$STUBS:$PATH" sk "$SWAPKIN" -p claude usage >/dev/null
+assert_true test -s "$SWAPKIN_DIR/work/ratelimit.until"
+out=$(sk "$SWAPKIN" providers --json)
+assert_true jq -e '.providers[] | select(.id=="claude") | .rateLimitedUntilMs > (now * 1000)' <<<"$out"
+mk_stub omarchy-agent-usage-claude 'echo called >> "$SWAPKIN_DIR/probe-calls"; echo "{}"'
+PATH="$STUBS:$PATH" sk "$SWAPKIN" -p claude usage >/dev/null
+assert_true test ! -e "$SWAPKIN_DIR/probe-calls"   # waits for the retry time, never asks
+rm -f "$STUBS/omarchy-agent-usage-claude"
+rm -f "$SWAPKIN_DIR/work/ratelimit" "$SWAPKIN_DIR/work/ratelimit.until"
+out=$(sk "$SWAPKIN" providers --json)
+assert_eq "no marker, not rateLimited" "false" "$(jq -r '.providers[] | select(.id=="claude") | .rateLimited' <<<"$out")"
+
 # ================================================================== summary ==
 echo
 echo "19. no captured test output contains a fixture token string"
@@ -606,6 +962,25 @@ if grep -qF "$LIVE_TOKEN" "$ALL_OUTPUT_LOG" 2>/dev/null \
 else
   ok "no captured test output contains any fixture token string"
 fi
+
+echo "21y. every pass logs a start and an end; a collapsed repeat moves its timestamp"
+auto_world '{"autoSwitch":false}'
+rm -f "$XDG_STATE_HOME/swapkin/check.log"
+sk "$SWAPKIN" check >/dev/null
+assert_contains "check logs its start" "$(cat "$XDG_STATE_HOME/swapkin/check.log")" "check start"
+assert_contains "check logs its end" "$(cat "$XDG_STATE_HOME/swapkin/check.log")" "check end rc=0"
+sed -i '$ s/^[^ ]* /2000-01-01T00:00:00 /' "$(AUTOLOG)"
+sk "$SWAPKIN" check >/dev/null
+assert_true test "$(tail -n 1 "$(AUTOLOG)" | cut -c1-4)" != 2000
+
+echo "21z. the watchdog's own skip note lands in the log; Service.qml keeps the guards"
+auto_world '{"autoSwitch":false}'
+sk "$SWAPKIN" note "skipped: previous check still running (12s)"
+assert_contains "note writes a log line" "$(tail -n 1 "$(AUTOLOG)")" "previous check still running"
+svc=$(cat "$ROOT/Service.qml")
+assert_contains "Service logs a run skipped for a running one" "$svc" "previous check still running"
+assert_contains "Service restarts a stuck run" "$svc" "watchProcess.running = false"
+assert_contains "Service starts after an unanswered read" "$svc" "id: loadGuard"
 
 echo "shipped demo data"
 shipped=$(SWAPKIN_DEMO=1 SWAPKIN_DEMO_FILE= "$ROOT/bin/swapkin" providers --json 2>&1 || true)

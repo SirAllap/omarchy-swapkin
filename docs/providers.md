@@ -32,8 +32,8 @@ Three modes:
   or run one directly with `swapkin run <id> -- <args>`. Sessions already
   running keep whatever they started with.
 - **never** — the tool only remembers one login; switching means signing in
-  again. (No built-in provider ships as `never` in v1; the mode exists for a
-  future one.)
+  again. Antigravity (`agy`) is the built-in one: it keeps a single sign-in
+  in the keyring, and its numbers come from Omarchy's collector, not swapkin.
 
 Copilot is a special cold case: it is backed by `gh`'s own account switch
 (`gh auth switch`), so `swapkin -p copilot use <name>` runs that instead of
@@ -41,9 +41,11 @@ moving files around.
 
 ## New commands
 
-- `swapkin providers --json` — every provider that is installed or has a
-  saved account, with its accounts and their usage. Read-only, no network:
-  it reads each account's already-saved `usage.json`.
+- `swapkin providers --json` — every provider with at least one saved account
+  or whose own CLI is logged in (the optional `p_has_login` hook; Codex checks
+  `auth.json`), with its accounts and their usage. A CLI that is merely
+  installed, or a `gh` login alone for Copilot, is not listed. Read-only, no
+  network: it reads each account's already-saved `usage.json`.
 - `swapkin usage` — with no `-p`/`SWAPKIN_PROVIDER`, probes every provider in
   the background and waits. With `-p`, probes just that one (as `usage`
   always did for Claude).
@@ -85,7 +87,7 @@ $SWAPKIN_DIR/providers/<id>/active
 ```
 
 - `id` follows the same rules as an account name (`a-z0-9_-`) and can't reuse
-  a built-in id (`claude`, `codex`, `copilot`).
+  a built-in id (`claude`, `codex`, `copilot`, `agy`).
 - **Custom providers are cold-only.** An entry with `"mode": "hot"` (or any
   mode other than `cold`), or with a `loginFiles` array, is ignored with a
   warning on stderr, before anything is created for it. Hot mode overwrites

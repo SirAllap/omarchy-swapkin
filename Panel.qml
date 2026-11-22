@@ -4,6 +4,7 @@ import Quickshell
 import Quickshell.Io
 import qs.Commons
 import qs.Ui
+import QtQuick.Shapes
 import "Budget.js" as Budget
 import "Models.js" as Models
 
@@ -15,12 +16,28 @@ Panel {
 
   readonly property color foreground: bar ? bar.foreground : Color.foreground
   readonly property color urgent: bar ? bar.urgent : Color.urgent
-  readonly property color dim: Qt.darker(foreground, 1.55)
+  // Foreground eased toward the surface, but never under 4.5:1 against it.
+  readonly property color dimSoft: Qt.tint(surface, Qt.rgba(foreground.r, foreground.g, foreground.b, 0.75))
+  readonly property color dim: Models.contrastRatio(colorLuminance(dimSoft), colorLuminance(surface)) >= 4.5 ? dimSoft : foreground
+  property string forgetPending: ""
   readonly property color surface: Color.popups.background
   readonly property color track: Style.selectedFillFor(foreground, Color.accent)
   readonly property string fontFamily: bar ? bar.fontFamily : Style.font.family
 
-  readonly property var providers: usage.enabledProviders
+  // ---- Settings read here, written by SettingsPage ----
+  readonly property string motionSetting: Models.motionMode(setting("motion", "system"))
+  // Follow the shell's own reduced-motion switch unless the owner chose.
+  readonly property bool reduced: Models.motionReduced(motionSetting, Style.reduceMotion)
+  function dur(ms) { return reduced ? 0 : ms }
+  readonly property string heroRingSetting: Models.heroMode(setting("heroRing", "tightest"))
+  readonly property string providersHiddenText: String(setting("providersHidden", ""))
+  readonly property string firstProviderSetting: String(setting("firstProvider", ""))
+  readonly property bool showCost: truthy(setting("showCost", true))
+  readonly property int watchMinutes: Models.snapStep(Models.WATCH_STEPS, setting("watchIntervalMin", 5), 5)
+  readonly property int warnAtPct: Models.snapStep(Models.WARN_STEPS, setting("alertAt", 90), 90)
+
+  readonly property var allProviders: Models.orderProviders(usage.enabledProviders)
+  readonly property var providers: Models.visibleProviders(allProviders, providersHiddenText)
   // The selection follows the provider, not the slot it happens to sit in: a
   // provider whose first scan lands while the panel is open would otherwise
   // shift the list underneath you and swap out what you were reading.
@@ -30,9 +47,30 @@ Panel {
       if (providers[i].providerId === selectedProviderId) return i
     return 0
   }
+  readonly property string selectedProviderIdOrFirst: providers.length > 0 ? providers[providerIndex].providerId : ""
   readonly property var provider: providers.length > 0 ? providers[providerIndex] : null
 
   property bool cursorActive: false
+  // Bumped when the panel opens and when the provider changes: the one signal
+  // the hero sweep and the staggered entries play on. Nothing else animates.
+  property int enterTick: 0
+  // The provider strip enters once, when the panel opens. Its own tick: a
+  // provider change or a data refresh must never replay it.
+  property int stripTick: 0
+  // The strip's Repeater is keyed on ids that only change when the set of
+  // providers does. Models.orderProviders hands back a new array on every
+  // refresh, and a Repeater on that array rebuilt every chip mid-entry.
+  property var providerIds: []
+  onProvidersChanged: {
+    var ids = []
+    for (var i = 0; i < providers.length; i++) ids.push(providers[i].providerId)
+    if (ids.join("\n") !== providerIds.join("\n")) providerIds = ids
+  }
+  function providerById(id) {
+    for (var i = 0; i < providers.length; i++)
+      if (providers[i].providerId === id) return providers[i]
+    return null
+  }
 
   // Countdowns and "updated" read this instead of Date.now() so the
   // panel keeps telling the truth while it sits open.
@@ -42,14 +80,28 @@ Panel {
   // record: right after a switch that record still holds the other account's
   // figures, and showing those is worse than showing nothing.
   readonly property var limits: providerWindows(provider, candidate)
-  readonly property bool accountsRefreshing: usage.swapkinLoading || probeProcess.running
+  readonly property bool accountsRefreshing: usage.swapkinLoading || syncProcess.running
   readonly property var models: modelRows(provider, modelsHiddenText)
-  readonly property var headline: tightest(limits)
+  readonly property var headline: Models.pickHero(limits, heroRingSetting)
   readonly property var balance: provider ? (provider.balance || null) : null
   // A prepaid account runs low the way a subscription window fills up: the
   // last 10% of the funded credits lights the same alarm.
   readonly property bool balanceAlarming: !!balance && balance.funded > 0
     && balance.remaining / balance.funded <= 0.1
+  // What the bar draws: the tightest limit of every provider, by its own
+  // active account. A prepaid provider with no window reads as credit spent.
+  readonly property var barRings: {
+    var entries = []
+    for (var i = 0; i < providers.length; i++) {
+      var p = providers[i]
+      var t = tightest(providerWindows(p, activeAccountFor(p)))
+      var pct = t ? t.percent : -1
+      var b = p.balance
+      if (pct < 0 && b && b.funded > 0) pct = 1 - b.remaining / b.funded
+      entries.push({ name: p.providerName, percent: pct })
+    }
+    return Models.miniRings(entries)
+  }
   readonly property bool alarming: (!!headline && headline.percent >= 0.9) || balanceAlarming
 
   function clamp(v, lo, hi) { return Math.max(lo, Math.min(hi, v)) }
@@ -63,6 +115,28 @@ Panel {
 
   function refreshNow() {
     usage.refreshAll(true)
+  }
+
+  // Sync: ask for fresh usage of every saved account of every provider, not
+  // only the active one, via `swapkin usage`. One run at a time.
+  property string syncError: ""
+  readonly property bool syncing: syncProcess.running
+  // After a Sync the owner pressed, Sync rests for a few seconds: two quick
+  // presses are what makes Anthropic rate limit the usage endpoint. The panel's
+  // own refresh on open never starts the rest.
+  property double syncEndMs: 0
+  property string syncHint: ""
+  readonly property int syncCooldown: Models.syncCooldownLeft(syncEndMs, nowMs)
+  readonly property var syncView: Models.syncView(syncing, syncError, !root.reduced, syncCooldown)
+  Timer { interval: 1000; repeat: true; running: root.syncCooldown > 0 && root.opened; onTriggered: root.nowMs = Date.now() }
+  function syncNow() {
+    if (syncProcess.running) return
+    if (syncCooldown > 0) { syncHint = Models.SYNC_REST_HINT; return }
+    syncHint = ""
+    syncError = ""
+    syncProcess.running = true
+    // A tool that will not launch may never fire onExited: say so now.
+    if (!syncProcess.running) syncError = "could not start swapkin"
   }
 
   function launchAgent() {
@@ -97,6 +171,9 @@ Panel {
   function windowTitle(label) {
     var text = String(label || "").toLowerCase()
     if (text.indexOf("month") >= 0) return "Monthly"
+    var span = windowSpanMs(label)
+    if (span >= 28 * 24 * 3600 * 1000) return "Monthly"
+    if (span >= 7 * 24 * 3600 * 1000) return "Weekly"
     if (windowIsLong(text)) return "Weekly"
     if (text.indexOf("session") >= 0 || windowSpanMs(label) > 0) return "Session"
     var plain = String(label || "").replace(/\s*\(.*\)\s*/, "").trim()
@@ -215,7 +292,7 @@ Panel {
   function heroMeta(p) {
     if (!p) return ""
     if (String(p.usageStatusText || "") !== "") return p.usageStatusText
-    var tier = String(p.tierLabel || "")
+    var tier = Models.stripProviderName(p.tierLabel, p.providerName)
     if (tier === "") return "Subscription"
     return tier.charAt(0).toUpperCase() + tier.slice(1)
   }
@@ -278,7 +355,7 @@ Panel {
         name: family, total: 0, input: 0, output: 0, cacheRead: 0, cacheWrite: 0, versions: {}
       })
       var v = fam.versions[version] || (fam.versions[version] = {
-        name: version !== "" ? version : family, version: version,
+        name: version !== "" ? family + " " + version : family, version: version,
         total: 0, input: 0, output: 0, cacheRead: 0, cacheWrite: 0
       })
       var total = input + output + cacheRead + cacheWrite
@@ -300,8 +377,7 @@ Panel {
       var versions = []
       for (var key in list[i].versions) versions.push(list[i].versions[key])
       versions.sort(function(a, b) { return parseFloat(a.version) - parseFloat(b.version) })
-      var peak = 1
-      for (var j = 0; j < versions.length; j++) peak = Math.max(peak, versions[j].total)
+      var peak = Math.max(1, list[i].total)
       // Bars only compare things: a family with one shown version has nothing
       // to be compared with, so it is one plain line ("Fable 5.1  2.9B").
       if (versions.length === 1) {
@@ -360,15 +436,23 @@ Panel {
   implicitHeight: button.implicitHeight
 
   onOpenedChanged: if (opened) {
+    enterTick++
+    stripTick++
     cursorActive = false
     candName = ""
     managing = false
+    settingsOpen = false
     colourEditing = ""
     paceCursor = -1
+    autoCursor = -1
     modelCursor = -1
+    setCursor = -1
+    renaming = ""
+    actionError = ""
+    if (firstProviderSetting !== "" && providerById(firstProviderSetting)) selectedProviderId = firstProviderSetting
     nowMs = Date.now()
     if (detailFlick) detailFlick.contentY = 0
-    usage.refreshLimits()
+    // Opening only reads the records on disk. Fetches belong to the timer and Sync.
     reloadAccounts()
     Qt.callLater(function() { keyCatcher.forceActiveFocus() })
   }
@@ -391,11 +475,18 @@ Panel {
   // no separate `list --json` process to keep in sync.
   readonly property var accounts: provider ? (provider.accounts || []) : []
   property bool managing: false
+  // The settings view for every provider (weekly pace, models shown). Never
+  // open together with manage, which is only the selected provider's.
+  property bool settingsOpen: false
+  readonly property bool subView: managing || settingsOpen
   property string colourEditing: ""
   readonly property bool hasAccounts: accounts.length > 0
   // Manage stays reachable with no saved accounts, so the first one (the
   // current login) can be saved from here instead of only from a terminal.
-  readonly property bool canManage: hasAccounts || (!!provider && provider.addHint !== "")
+  readonly property bool canManage: Models.canManage(provider)
+  // A one-login provider (Antigravity) has nothing to switch to.
+  readonly property bool canSwitchAccounts: !!provider && provider.mode !== "never"
+  readonly property bool canAutoSwitch: Models.canAutoSwitch(provider)
   readonly property var activeAccount: {
     for (var i = 0; i < accounts.length; i++) if (accounts[i].active) return accounts[i]
     return null
@@ -424,10 +515,15 @@ Panel {
   // must not survive and match a same-named account of the new provider (L9).
   readonly property string providerId: provider ? provider.providerId : ""
   onProviderIdChanged: {
+    enterTick++
     candName = ""
     managing = false
+    settingsOpen = false
     paceCursor = -1
+    autoCursor = -1
     modelCursor = -1
+    setCursor = -1
+    renaming = ""
   }
 
   function stepCandidate(direction) {
@@ -447,12 +543,28 @@ Panel {
 
   function toggleManage() {
     managing = !managing
+    settingsOpen = false
     colourEditing = ""
+    renaming = ""
+    actionError = ""
+    setCursor = -1
     paceCursor = -1
+    autoCursor = -1
     modelCursor = -1
   }
 
-  // ---- Weekly pace, edited from the manage screen ----
+  function toggleSettings() {
+    settingsOpen = !settingsOpen
+    managing = false
+    colourEditing = ""
+    renaming = ""
+    setCursor = -1
+    paceCursor = -1
+    autoCursor = -1
+    modelCursor = -1
+  }
+
+  // ---- Weekly pace, edited from the settings view ----
   // The same four widget settings Omarchy's plugin settings page edits; the
   // write is the one the clock panel uses (the shell rewrites shell.json and
   // hands the entry back). Without that call on this shell the block stays
@@ -471,7 +583,7 @@ Panel {
   property int paceCursor: -1
   readonly property var paceRows: [[0, 1], [2, 3, 4, 5, 6, 7, 8], [9, 10], [11, 12]]
 
-  // ---- Models shown, edited from the manage screen ----
+  // ---- Models shown, edited from the settings view ----
   // Hiding a model only leaves it out of "tokens by model"; the usage itself
   // is never touched. The hidden ids are one comma-separated plugin setting.
   readonly property string modelsHiddenText: String(setting("modelsHidden", ""))
@@ -530,23 +642,110 @@ Panel {
     }
   }
 
+  // ---- The other settings, edited from the settings view ----
+  // Keyboard: up/down pick a row, left/right change it, enter changes it
+  // forward (or toggles the provider under provCursor).
+  property int setCursor: -1
+  property int provCursor: 0
+  readonly property var settingRows: ["watch", "warn", "hero", "first", "cost", "motion", "providers"]
+  readonly property var heroOptions: [{ id: "tightest", label: "Tightest" }, { id: "weekly", label: "Weekly" }, { id: "session", label: "Session" }]
+  readonly property var motionOptions: [{ id: "system", label: "System" }, { id: "reduce", label: "Reduce" }, { id: "full", label: "Full" }]
+
+  function cycle(list, current, dir) {
+    var at = 0
+    for (var i = 0; i < list.length; i++) if (list[i] === current) at = i
+    return list[(at + dir + list.length) % list.length]
+  }
+
+  function settingMove(dx, dy) {
+    if (dy !== 0) {
+      var to = setCursor + dy
+      setCursor = Math.max(-1, Math.min(settingRows.length - 1, to))
+    } else if (setCursor >= 0) settingChange(settingRows[setCursor], dx)
+  }
+
+  function settingChange(row, dir) {
+    if (!canWritePace || dir === 0) return
+    if (row === "watch") persistSettings({ watchIntervalMin: Models.stepBy(Models.WATCH_STEPS, watchMinutes, dir, 5) })
+    else if (row === "warn") persistSettings({ alertAt: Models.stepBy(Models.WARN_STEPS, warnAtPct, dir, 90) })
+    else if (row === "hero") persistSettings({ heroRing: cycle(Models.HERO_MODES, heroRingSetting, dir) })
+    else if (row === "motion") persistSettings({ motion: cycle(Models.MOTION_MODES, motionSetting, dir) })
+    else if (row === "cost") persistSettings({ showCost: !showCost })
+    else if (row === "first") {
+      var ids = [""]
+      for (var i = 0; i < allProviders.length; i++) ids.push(allProviders[i].providerId)
+      persistSettings({ firstProvider: cycle(ids, firstProviderSetting, dir) })
+    } else if (row === "providers") {
+      if (allProviders.length === 0) return
+      provCursor = Math.max(0, Math.min(allProviders.length - 1, provCursor + dir))
+    }
+  }
+
+  function settingActivate() {
+    if (setCursor < 0) return
+    var row = settingRows[setCursor]
+    if (row === "providers") toggleProvider(provCursor)
+    else settingChange(row, 1)
+  }
+
+  function toggleProvider(i) {
+    if (!canWritePace || i < 0 || i >= allProviders.length) return
+    var ids = allProviders.map(function(p) { return p.providerId })
+    persistSettings({ providersHidden: Models.toggleProviderHidden(providersHiddenText, ids[i], ids) })
+  }
+
+  // ---- Manage keys: act on the account in view ----
+  function manageKey(t) {
+    var a = candidate
+    var k = String(t).toLowerCase()
+    if (k === "v" && Models.unsavedLogin(provider)) { saveCurrentLogin(); return true }
+    if (!a) return false
+    if (k === "u") { if (canSwitchAccounts && !a.active) useAccount(a.name); return true }
+    if (k === "n") { renaming = a.name; return true }
+    if (k === "c") { colourEditing = colourEditing === a.name ? "" : a.name; return true }
+    if (k === "f") { if (!a.active) forgetAccount(a.name); return true }
+    return false
+  }
+
+  // ---- Auto-switch, edited from the manage screen ----
+  // Cursor: -1 off; 0/1 the on/off chips, 2/3 the stepper, 4/5 the return on/off chips.
+  property int autoCursor: -1
+  readonly property var autoRows: [[0, 1], [2, 3], [4, 5]]
+  function truthy(v) { return v === true || String(v).toLowerCase() === "true" }
+  readonly property bool autoOn: truthy(setting("autoSwitch", false))
+  readonly property bool autoReturn: truthy(setting("autoSwitchReturn", false))
+  readonly property int autoLeft: Budget.stepLeftPct(setting("autoSwitchLeftPct", 5), 0)
+
+  function autoActivate(i) {
+    if (!canWritePace) return
+    if (i < 2) persistSettings({ autoSwitch: i === 0 })
+    else if (i < 4) persistSettings({ autoSwitchLeftPct: Budget.stepLeftPct(autoLeft, i === 2 ? -1 : 1) })
+    else persistSettings({ autoSwitchReturn: i === 4 })
+  }
+
+  function autoMove(dx, dy) {
+    var row = 0, col = 0
+    for (var r = 0; r < autoRows.length; r++) {
+      var at = autoRows[r].indexOf(autoCursor)
+      if (at >= 0) { row = r; col = at }
+    }
+    if (dy !== 0) {
+      var to = row + dy
+      if (to < 0) { autoCursor = -1; return }
+      if (to >= autoRows.length) return
+      autoCursor = autoRows[to][Math.min(col, autoRows[to].length - 1)]
+    } else {
+      autoCursor = autoRows[row][Math.max(0, Math.min(autoRows[row].length - 1, col + dx))]
+    }
+  }
+
   function peakText(a) {
     var peak = tightest(limitWindows(a))
     return peak ? " · " + Math.round(peak.percent * 100) + "% peak" : ""
   }
 
-  // One chip per provider whose paying account Swapkin knows, for the strip
-  // on top.
-  readonly property var payers: {
-    var out = []
-    for (var i = 0; i < providers.length; i++) {
-      var p = providers[i]
-      var active = activeAccountFor(p)
-      if (active) out.push({ providerId: p.providerId, providerName: p.providerName,
-                              payer: active.name, tint: accountColour(active, p.accounts) })
-    }
-    return out
-  }
+  // Who pays for the next message, for the provider being looked at.
+  readonly property string payerLabel: Models.payerLine(provider, activeAccount)
 
   // Open sessions catch up on their own; a switch that needs a fresh sign-in
   // never picks anything up automatically.
@@ -595,7 +794,7 @@ Panel {
   // A tool that reports no plan gets just the name, not a dangling dot.
   function nameAndPlan(a) {
     var plan = accountPlan(a)
-    return a.name + (plan ? " · " + plan : "")
+    return Models.accountLabel(a) + (plan ? " · " + plan : "")
   }
 
   function accountPlan(a) {
@@ -639,22 +838,28 @@ Panel {
 
   Process {
     id: accountActionProcess
+    stderr: StdioCollector { id: actionErr; waitForEnd: true }
     onExited: function(exitCode) {
+      root.actionError = exitCode === 0 ? "" : Models.syncReason(actionErr.text, exitCode).replace(/^swapkin: /, "")
       root.reloadAccounts()
-      root.refreshNow()
     }
   }
 
   Process {
-    id: probeProcess
+    id: syncProcess
     command: [root.accountTool, "usage"]
-    // Fresh figures land on the next providers listing.
-    onExited: root.reloadAccounts(false)
+    stderr: StdioCollector { id: syncErr; waitForEnd: true }
+    onExited: function(exitCode) {
+      root.syncEndMs = Date.now()
+      root.nowMs = root.syncEndMs
+      root.syncError = exitCode === 0 ? "" : Models.syncReason(syncErr.text, exitCode)
+      root.reloadAccounts()
+    }
   }
 
-  function reloadAccounts(probe) {
+  // Reads the records on disk. Never starts a fetch.
+  function reloadAccounts() {
     usage.reloadSwapkin()
-    if (probe !== false && !probeProcess.running) probeProcess.running = true
     if (!costProcess.running) costProcess.running = true
   }
 
@@ -678,9 +883,30 @@ Panel {
     accountActionProcess.running = true
   }
 
+  // The last account action that failed, said in the manage page.
+  property string actionError: ""
+  // The account being renamed (its name, not its label); "" when none.
+  property string renaming: ""
+  function refocusKeys() { keyCatcher.forceActiveFocus() }
+  function formatTokens(n) { return usage.formatTokenCount(n) }
+  function renameAccount(name, text) {
+    renaming = ""
+    Qt.callLater(function() { keyCatcher.forceActiveFocus() })
+    runAccountAction(["label", name, text])
+  }
+  // The CLI's own login, never saved: store it as the first account. No
+  // terminal needed, the tool just reads what is already signed in.
+  function saveCurrentLogin() { runAccountAction(["add", "main"]) }
   function useAccount(name) { runAccountAction(["use", name]) }
   function recolourAccount(name, colour) { runAccountAction(["colour", name, colour]) }
-  function forgetAccount(name) { runAccountAction(["remove", name]) }
+  // First press asks "sure?", the second within 2s removes the login.
+  function forgetAccount(name) {
+    if (forgetPending !== name) { forgetPending = name; forgetTimer.restart(); return }
+    forgetPending = ""
+    forgetTimer.stop()
+    runAccountAction(["remove", name])
+  }
+  Timer { id: forgetTimer; interval: 2000; onTriggered: root.forgetPending = "" }
 
   // Signing in needs a terminal: the tool opens the provider's own login flow
   // in a throwaway home and imports it once you are done.
@@ -699,7 +925,12 @@ Panel {
       }
   }
 
-  Component.onCompleted: reloadAccounts()
+  Component.onCompleted: {
+    var ids = []
+    for (var i = 0; i < providers.length; i++) ids.push(providers[i].providerId)
+    providerIds = ids
+    reloadAccounts()
+  }
 
   // Cheap enough to keep running: it only re-evaluates text bindings, and a
   // stale "resets in 2h" on a panel that is open is worse than a timer.
@@ -707,7 +938,7 @@ Panel {
     interval: 30000
     running: root.opened
     repeat: true
-    onTriggered: root.nowMs = Date.now()
+    onTriggered: { root.nowMs = Date.now(); usage.reloadSwapkin() }
   }
 
   IpcHandler {
@@ -727,44 +958,58 @@ Panel {
     bar: root.bar
     text: "󱚣"
 
-    // Two rings overlapping by half: the filled one is the account in
-    // use, in its own colour. Drawn rather than shipped as an asset, because
-    // the colour changes with the account.
+    // The mark from icons/account-A.svg (viewBox 40): a filled disc in the
+    // account in use, and an outline ring in the theme foreground drawn on top
+    // of it, in the SVG's own units (disc r10, ring r10 + stroke 4; the ring sits
+    // 2 units closer than the SVG). The bar would shrink any drawn item until its
+    // long side is Style.bar.iconSize (12), which made the pair small next to the
+    // bell. It measures only Rectangle/Text/Image/Shape items, so the art is
+    // drawn in a hidden item and shown through a ShaderEffectSource, which it
+    // does not measure: the mark keeps the size set here, 18 x 14.4, 1.5x what
+    // the bar gave it. Never the urgent colour.
     iconComponent: Component {
-      // The loader hands this item the whole optical canvas, so fill it and
-      // centre the drawing inside: otherwise the pair sits against the left
-      // edge and the bar spacing looks lopsided.
       Item {
         anchors.fill: parent
 
         Item {
-          readonly property real ring: Math.round(Style.font.display * 0.5)
-          readonly property color tint: root.accountColour(root.activeAccount)
-
-          width: ring * 1.5
-          height: ring
-          anchors.centerIn: parent
+          id: art
+          visible: false
+          width: 30
+          height: 24
 
           Rectangle {
-            width: parent.ring
-            height: width
-            radius: width / 2
-            color: parent.tint
             x: 0
+            y: 2
+            width: 20
+            height: 20
+            radius: 10
+            color: root.accountColour(root.activeAccount)
           }
 
           Rectangle {
-            width: parent.ring
-            height: width
-            radius: width / 2
+            x: 6
+            y: 0
+            width: 24
+            height: 24
+            radius: 12
             color: "transparent"
-            border.width: Math.max(1.5, Math.round(parent.ring * 0.22))
-            border.color: root.foreground
-            x: parent.ring * 0.5
+            border.width: 4
+            border.color: button.foreground
           }
+        }
+
+        ShaderEffectSource {
+          sourceItem: art
+          anchors.centerIn: parent
+          width: 18
+          height: 14.4
+          textureSize: Qt.size(art.width * 8, art.height * 8)
+          smooth: true
         }
       }
     }
+    Accessible.name: root.provider
+      ? Models.barSummary(root.provider.providerName, root.activeAccount ? root.activeAccount.name : "", root.headline ? root.headline.percent : -1) : "Swapkin"
 
     onPressed: function(buttonCode) {
       if (buttonCode === Qt.RightButton) root.launchAgent()
@@ -787,28 +1032,34 @@ Panel {
     contentHeight: panel.fittedContentHeight(
       header.implicitHeight + bodyHeight + keyBar.implicitHeight + Style.space(12) * 2)
 
-    readonly property real bodyHeight: Math.max(sideColumn.implicitHeight, detailColumn.implicitHeight)
+    readonly property real bodyHeight: strip.implicitHeight + detailColumn.implicitHeight + Style.space(18)
 
     PanelKeyCatcher {
       id: keyCatcher
       anchors.fill: parent
 
       onMoveRequested: function(dx, dy) {
+        if (root.renaming !== "") return
+        if (root.settingsOpen && root.paceCursor < 0 && root.modelCursor < 0 && root.autoCursor < 0) { root.settingMove(dx, dy); return }
         if (root.paceCursor >= 0) { root.paceMove(dx, dy); return }
+        if (root.autoCursor >= 0) { root.autoMove(dx, dy); return }
         if (root.modelCursor >= 0) { root.modelMove(dx + dy); return }
         root.cursorActive = true
         if (dy !== 0) root.selectProvider(root.providerIndex + dy)
         if (dx !== 0) root.stepCandidate(dx)
       }
-      onActivateRequested: if (root.paceCursor >= 0) root.paceActivate(root.paceCursor); else if (root.modelCursor >= 0) root.modelActivate(root.modelCursor); else root.refreshNow()
-      onCloseRequested: if (root.paceCursor >= 0) root.paceCursor = -1; else if (root.modelCursor >= 0) root.modelCursor = -1; else root.close()
+      onActivateRequested: if (root.settingsOpen && root.paceCursor < 0 && root.modelCursor < 0 && root.setCursor >= 0) root.settingActivate(); else if (root.paceCursor >= 0) root.paceActivate(root.paceCursor); else if (root.autoCursor >= 0) root.autoActivate(root.autoCursor); else if (root.modelCursor >= 0) root.modelActivate(root.modelCursor); else root.syncNow()
+      onCloseRequested: if (root.setCursor >= 0) root.setCursor = -1; else if (root.colourEditing !== "") root.colourEditing = ""; else if (root.paceCursor >= 0) root.paceCursor = -1; else if (root.autoCursor >= 0) root.autoCursor = -1; else if (root.modelCursor >= 0) root.modelCursor = -1; else root.close()
       onTabRequested: function(direction) { root.switchPanel(direction) }
       onTextKey: function(t) {
-        if ((t === "w" || t === "W") && root.managing) { root.modelCursor = -1; root.paceCursor = root.paceCursor >= 0 ? -1 : (root.paceWorking ? 2 : 0) }
-        else if ((t === "o" || t === "O") && root.managing && root.modelChips.length > 0) { root.paceCursor = -1; root.modelCursor = root.modelCursor >= 0 ? -1 : 0 }
-        else if (t === "r" || t === "R") root.refreshNow()
+        if ((t === "w" || t === "W") && root.settingsOpen) { root.modelCursor = -1; root.autoCursor = -1; root.paceCursor = root.paceCursor >= 0 ? -1 : (root.paceWorking ? 2 : 0) }
+        else if ((t === "s" || t === "S") && root.managing && root.canAutoSwitch) { root.modelCursor = -1; root.paceCursor = -1; root.autoCursor = root.autoCursor >= 0 ? -1 : 0 }
+        else if ((t === "o" || t === "O") && root.settingsOpen && root.modelChips.length > 0) { root.paceCursor = -1; root.autoCursor = -1; root.modelCursor = root.modelCursor >= 0 ? -1 : 0 }
+        else if (root.managing && t.length === 1 && "uUnNcCfFvV".indexOf(t) >= 0 && root.manageKey(t)) { }
+        else if (t === "r" || t === "R") root.syncNow()
         else if ((t === "a" || t === "A") && root.accounts.length > 1) root.switchToCandidate()
         else if ((t === "m" || t === "M") && root.canManage) root.toggleManage()
+        else if (t === "," || ((t === "s" || t === "S") && !(root.managing && root.canAutoSwitch))) root.toggleSettings()
       }
 
       Column {
@@ -821,40 +1072,190 @@ Panel {
           width: parent.width
           spacing: Style.space(10)
 
-          PanelHero {
+          // ---- Hero gauge: how full the tightest limit is, the first thing seen ----
+          Item {
+            id: hero
             visible: !!root.provider
             width: parent.width
-            title: "Swapkin"
-            meta: root.activeAccount
-              ? root.nameAndPlan(root.activeAccount)
-              : root.heroMeta(root.provider)
-            foreground: root.foreground
-            fontFamily: root.fontFamily
+            height: Style.space(112)
 
-            iconComponent: Component {
-              Item {
-                // The hero sizes itself to this item, so state the size here:
-                // one and a half rings wide, one ring tall.
-                readonly property real ring: Math.round(Style.font.display * 0.72)
-                width: ring * 1.5
-                height: ring
+            readonly property real ring: Style.space(92)
+            readonly property color hue: root.alarming ? root.urgent : root.accountColour(root.candidate)
+            readonly property real pct: root.headline ? root.headline.percent : -1
+            property real glowIn: 1
+            property real breath: 1
+            property real flash: 0
+            property real lastPct: -1
+            property string lastKey: ""
 
-                Rectangle {
-                  width: parent.ring
-                  height: width
-                  radius: width / 2
-                  color: root.accountColour(root.activeAccount)
+            Accessible.role: Accessible.ProgressBar
+            Accessible.name: root.provider
+              ? root.provider.providerName + (root.headline ? ", " + root.headline.title : "")
+                + (pct >= 0 ? ", " + Math.round(pct * 100) + " percent used" + (root.alarming ? ", nearly full" : "") : ", no data")
+              : ""
+
+            // The open sweep: ring from empty to the value, the number in step,
+            // the glow fading in behind it.
+            function replay() {
+              heroGauge.sweepMs = 0
+              heroGauge.shown = 0
+              glowIn = 0
+              heroGauge.sweepMs = 700
+              heroGauge.shown = pct >= 0 ? pct : 0
+              if (!root.reduced) glowFade.restart(); else glowIn = 1
+            }
+
+            Connections {
+              target: root
+              function onEnterTickChanged() { hero.replay(); if (hero.breathing) breathAnim.restart() }
+            }
+
+            // Pulse when the same account's usage goes up: one soft beat.
+            onPctChanged: {
+              var key = root.selectedProviderId + "/" + (root.candidate ? root.candidate.name : "")
+              if (key === lastKey && lastPct >= 0 && pct > lastPct && !root.reduced && root.opened) pulse.restart()
+              lastKey = key
+              lastPct = pct
+            }
+
+            NumberAnimation { id: glowFade; target: hero; property: "glowIn"; from: 0; to: 1; duration: root.dur(600); easing.type: Easing.BezierSpline; easing.bezierCurve: [0.23, 1, 0.32, 1, 1, 1] }
+
+            SequentialAnimation {
+              id: pulse
+              ParallelAnimation {
+                NumberAnimation { target: heroGauge; property: "scale"; to: 1.05; duration: root.dur(180); easing.type: Easing.OutCubic }
+                NumberAnimation { target: hero; property: "flash"; to: 1; duration: root.dur(200) }
+              }
+              ParallelAnimation {
+                NumberAnimation { target: heroGauge; property: "scale"; to: 1; duration: root.dur(320); easing.type: Easing.OutBack; easing.overshoot: 2 }
+                NumberAnimation { target: hero; property: "flash"; to: 0; duration: root.dur(200) }
+              }
+            }
+
+            // A slow breath on the glow: three cycles, only for a full limit and
+            // only while open. It restarts on open and provider change.
+            readonly property bool breathing: root.opened && root.alarming && !root.reduced && hero.visible
+            onBreathingChanged: if (breathing) breathAnim.restart(); else { breathAnim.stop(); breath = 1 }
+            SequentialAnimation {
+              id: breathAnim
+              loops: 3
+              onFinished: hero.breath = 1
+              NumberAnimation { target: hero; property: "breath"; to: 0.7; duration: root.dur(1200); easing.type: Easing.InOutSine }
+              NumberAnimation { target: hero; property: "breath"; to: 1; duration: root.dur(1200); easing.type: Easing.InOutSine }
+            }
+
+            // Glow in the provider hue: a radial fade, no blur effect.
+            Shape {
+              x: heroGauge.x + heroGauge.width / 2 - width / 2
+              y: heroGauge.y + heroGauge.height / 2 - height / 2
+              width: hero.ring * 1.9
+              height: width
+              opacity: hero.glowIn * hero.breath
+              preferredRendererType: Shape.CurveRenderer
+              ShapePath {
+                strokeColor: "transparent"
+                fillGradient: RadialGradient {
+                  centerX: hero.ring * 0.95; centerY: hero.ring * 0.95
+                  centerRadius: hero.ring * 0.95
+                  focalX: centerX; focalY: centerY
+                  GradientStop { position: 0.0; color: root.alpha(hero.hue, 0.18) }
+                  GradientStop { position: 0.55; color: root.alpha(hero.hue, 0.08) }
+                  GradientStop { position: 1.0; color: root.alpha(hero.hue, 0) }
                 }
+                PathRectangle { x: 0; y: 0; width: hero.ring * 1.9; height: width }
+              }
+            }
 
-                Rectangle {
-                  width: parent.ring
-                  height: width
-                  radius: width / 2
-                  color: "transparent"
-                  border.width: Math.max(1.5, Math.round(parent.ring * 0.20))
-                  border.color: root.foreground
-                  x: parent.ring * 0.5
+            // Settings for every provider (key , or s).
+            Button {
+              id: settingsButton
+              z: 2
+              anchors.right: parent.right
+              anchors.top: parent.top
+              text: "⚙"
+              bordered: root.settingsOpen
+              foreground: root.foreground
+              fontFamily: root.fontFamily
+              fontSize: Style.font.body
+              verticalPadding: Style.space(3)
+              Accessible.name: root.settingsOpen ? "Close settings" : "Open settings for all providers"
+              onClicked: root.toggleSettings()
+            }
+
+            Gauge {
+              id: heroGauge
+              reduced: root.reduced
+              x: Style.space(8)
+              anchors.verticalCenter: parent.verticalCenter
+              size: hero.ring
+              thickness: Math.round(hero.ring * 0.11)
+              value: hero.pct
+              sweepMs: 450
+              settleMs: 450
+              alarm: root.alarming
+              trackColor: root.alpha(root.foreground, 0.2)
+              valueColor: root.accountColour(root.candidate)
+              alarmColor: root.urgent
+
+              Row {
+                anchors.centerIn: parent
+                spacing: 1
+                Text {
+                  id: heroNumber
+                  textFormat: Text.PlainText
+                  text: hero.pct >= 0 ? Models.countUp(heroGauge.value, heroGauge.value > 0 ? heroGauge.shown / heroGauge.value : 1) : "–"
+                  color: Qt.tint(root.dim, Qt.rgba(root.foreground.r, root.foreground.g, root.foreground.b, hero.flash))
+                  font.family: root.fontFamily
+                  font.pixelSize: Math.round(hero.ring * 0.36)
+                  font.bold: true
                 }
+                Text {
+                  visible: hero.pct >= 0
+                  anchors.baseline: heroNumber.baseline
+                  textFormat: Text.PlainText
+                  text: "%"
+                  color: root.dim
+                  font.family: root.fontFamily
+                  font.pixelSize: Math.round(hero.ring * 0.18)
+                }
+              }
+            }
+
+            Column {
+              anchors.left: heroGauge.right
+              anchors.leftMargin: Style.space(20)
+              anchors.right: parent.right
+              anchors.verticalCenter: parent.verticalCenter
+              spacing: Style.space(3)
+
+              Text {
+                width: parent.width
+                elide: Text.ElideRight
+                textFormat: Text.PlainText
+                text: root.provider ? root.provider.providerName : ""
+                color: root.foreground
+                font.family: root.fontFamily
+                font.pixelSize: Style.font.body
+                font.bold: true
+              }
+              Text {
+                width: parent.width
+                elide: Text.ElideRight
+                textFormat: Text.PlainText
+                text: root.candidate ? root.nameAndPlan(root.candidate) + (root.candidate.active ? "" : " · not active") : root.heroMeta(root.provider)
+                color: root.dim
+                font.family: root.fontFamily
+                font.pixelSize: Style.font.caption
+              }
+              Text {
+                visible: !!root.headline
+                width: parent.width
+                elide: Text.ElideRight
+                textFormat: Text.PlainText
+                text: root.headline ? root.headline.title + (root.resetText(root.headline) !== "" ? " · " + root.resetText(root.headline) : "") : ""
+                color: root.foreground
+                font.family: root.fontFamily
+                font.pixelSize: Style.font.bodySmall
               }
             }
           }
@@ -871,96 +1272,49 @@ Panel {
             horizontalAlignment: Text.AlignHCenter
             wrapMode: Text.WordWrap
           }
-
-          // Only providers whose paying account Swapkin knows are listed: a
-          // provider with one login has no "which account" to answer.
-          Column {
-            visible: root.payers.length > 0
-            width: parent.width
-            spacing: Style.space(6)
-
-            PanelSectionHeader {
-              text: "NEXT MESSAGE IS PAID BY"
-              foreground: root.foreground
-              fontFamily: root.fontFamily
-            }
-
-            Flow {
-              width: parent.width
-              spacing: Style.space(8)
-
-              Repeater {
-                model: root.payers
-
-                Button {
-                  required property var modelData
-
-                  text: modelData.providerName + " · " + modelData.payer
-                  selected: modelData.providerId === root.provider.providerId
-                  bordered: true
-                  foreground: modelData.tint
-                  fontFamily: root.fontFamily
-                  fontSize: Style.font.bodySmall
-                  verticalPadding: Style.space(3)
-                  onClicked: root.selectedProviderId = modelData.providerId
-                }
-              }
-            }
-          }
         }
 
-        // ---------- Body: providers on the left, the chosen one on the right ----------
-        Row {
+        // ---------- Body: the provider strip, then the chosen one below ----------
+        Column {
           visible: root.providers.length > 0
           width: parent.width
           height: parent.height - header.height - keyBar.height - parent.spacing * 2
+          spacing: Style.space(8)
 
-          Flickable {
-            id: sideFlick
-            width: Style.space(224)
-            height: parent.height
-            contentWidth: width
-            contentHeight: sideColumn.implicitHeight
-            clip: true
-            boundsBehavior: Flickable.StopAtBounds
-            flickableDirection: Flickable.VerticalFlick
-            interactive: contentHeight > height
-            ScrollBar.vertical: ScrollBar { policy: ScrollBar.AsNeeded }
+          Row {
+            id: strip
+            width: parent.width
+            spacing: Style.space(6)
 
-            Column {
-              id: sideColumn
-              width: sideFlick.width - (sideFlick.interactive ? Style.space(10) : 0)
-              spacing: Style.space(4)
+            Repeater {
+              model: root.providerIds
 
-              Repeater {
-                model: root.providers
+              ProviderChip {
+                required property string modelData
+                required property int index
 
-                ProviderRow {
-                  required property var modelData
-                  required property int index
-
-                  width: sideColumn.width
-                  provider: modelData
-                  selected: index === root.providerIndex
-                  onClicked: {
-                    root.cursorActive = true
-                    root.selectProvider(index)
-                  }
+                width: (strip.width - strip.spacing * Math.max(0, root.providerIds.length - 1)) / Math.max(1, root.providerIds.length)
+                provider: root.providerById(modelData)
+                position: index
+                selected: modelData === root.selectedProviderIdOrFirst
+                onClicked: {
+                  root.cursorActive = true
+                  root.selectProvider(index)
                 }
               }
             }
           }
 
           Rectangle {
-            width: 1
-            height: parent.height
+            width: parent.width
+            height: 1
             color: root.alpha(root.foreground, 0.18)
           }
 
           Flickable {
             id: detailFlick
-            width: parent.width - sideFlick.width - 1
-            height: parent.height
+            width: parent.width
+            height: parent.height - strip.height - 1 - parent.spacing * 2
             contentWidth: width
             contentHeight: detailColumn.implicitHeight
             clip: true
@@ -983,8 +1337,9 @@ Panel {
 
               // ---- Provider title, the way it switches, and who is affected ----
               Item {
+                visible: !root.settingsOpen
                 width: parent.width
-                implicitHeight: Math.max(detailTitle.implicitHeight, manageButton.implicitHeight)
+                implicitHeight: Math.max(detailTitle.implicitHeight, manageButton.implicitHeight, syncRow.implicitHeight)
 
                 Row {
                   id: detailTitle
@@ -999,9 +1354,60 @@ Panel {
                     font.family: root.fontFamily
                     font.pixelSize: Style.font.body
                     font.bold: true
+                    anchors.verticalCenter: parent.verticalCenter
                   }
 
-                  ModePill { visible: root.hasAccounts; label: root.provider ? root.provider.modeLabel : "" }
+                  // Who pays when you use this provider, right where you look.
+                  Text {
+                    textFormat: Text.PlainText
+                    text: root.payerLabel
+                    color: root.activeAccount ? root.accountColour(root.activeAccount) : root.dim
+                    font.family: root.fontFamily
+                    font.pixelSize: Style.font.caption
+                    anchors.verticalCenter: parent.verticalCenter
+                  }
+
+                }
+
+                Row {
+                  id: syncRow
+                  anchors.right: manageButton.visible ? manageButton.left : parent.right
+                  anchors.rightMargin: manageButton.visible ? Style.space(6) : 0
+                  anchors.verticalCenter: parent.verticalCenter
+                  spacing: Style.space(6)
+
+                  // A quarter ring that turns only while syncing, and not at all
+                  // with reduced motion (the button then says "Syncing…").
+                  Gauge {
+                    id: spinner
+                    reduced: root.reduced
+                    visible: root.syncView.spin
+                    anchors.verticalCenter: parent.verticalCenter
+                    size: Style.space(14)
+                    thickness: Style.space(2)
+                    value: 0.28
+                    trackColor: root.alpha(root.foreground, 0.2)
+                    valueColor: root.foreground
+                    RotationAnimator on rotation {
+                      from: 0; to: 360; duration: root.dur(900)
+                      loops: Animation.Infinite
+                      running: spinner.visible && root.opened
+                    }
+                  }
+
+                  Button {
+                    id: syncButton
+                    enabled: !root.syncView.disabled
+                    opacity: root.syncView.resting ? 0.4 : 1
+                    text: root.syncView.label + (root.syncView.disabled ? "" : "  (r)")
+                    bordered: true
+                    foreground: root.foreground
+                    fontFamily: root.fontFamily
+                    fontSize: Style.font.caption
+                    verticalPadding: Style.space(3)
+                    Accessible.name: root.syncView.disabled ? "Syncing usage for every account" : "Sync usage for every account"
+                    onClicked: root.syncNow()
+                  }
                 }
 
                 Button {
@@ -1020,7 +1426,39 @@ Panel {
               }
 
               Text {
-                visible: root.hasAccounts && root.provider && root.provider.sessions > 0
+                visible: !root.settingsOpen && text !== ""
+                width: parent.width
+                textFormat: Text.PlainText
+                text: Models.syncedLine(root.providers, root.nowMs)
+                color: root.dim
+                font.family: root.fontFamily
+                font.pixelSize: Style.font.caption
+              }
+
+              Text {
+                visible: !root.settingsOpen && root.syncView.resting && root.syncHint !== ""
+                width: parent.width
+                wrapMode: Text.WordWrap
+                textFormat: Text.PlainText
+                text: root.syncHint
+                color: root.dim
+                font.family: root.fontFamily
+                font.pixelSize: Style.font.caption
+              }
+
+              Text {
+                visible: !root.settingsOpen && root.syncView.error !== ""
+                width: parent.width
+                wrapMode: Text.WordWrap
+                textFormat: Text.PlainText
+                text: "Sync failed: " + root.syncView.error
+                color: root.urgent
+                font.family: root.fontFamily
+                font.pixelSize: Style.font.caption
+              }
+
+              Text {
+                visible: !root.settingsOpen && root.hasAccounts && root.provider && root.provider.sessions > 0
                 width: parent.width
                 wrapMode: Text.WordWrap
                 textFormat: Text.PlainText
@@ -1030,413 +1468,23 @@ Panel {
                 font.pixelSize: Style.font.caption
               }
 
-              // ---- Manage: recolour, forget, add ----
-              Column {
+              // ---- Manage: every account of this provider, one place, same for all ----
+              ManagePage {
+                host: root
                 visible: root.canManage && root.managing
                 width: parent.width
-                spacing: Style.space(6)
+              }
 
-                Repeater {
-                  model: root.accounts
-
-                  Column {
-                    id: manageEntry
-                    required property var modelData
-
-                    readonly property bool expanded: root.colourEditing === modelData.name
-
-                    width: parent.width
-                    spacing: Style.space(6)
-
-                    Item {
-                      width: parent.width
-                      implicitHeight: Math.max(manageName.implicitHeight, forgetButton.implicitHeight)
-
-                      Rectangle {
-                        id: colourDot
-                        width: Style.space(14)
-                        height: width
-                        radius: width / 2
-                        color: root.accountColour(manageEntry.modelData)
-                        border.width: manageEntry.expanded ? 2 : 0
-                        border.color: root.foreground
-                        anchors.left: parent.left
-                        anchors.verticalCenter: parent.verticalCenter
-
-                        MouseArea {
-                          anchors.fill: parent
-                          anchors.margins: -Style.space(4)
-                          cursorShape: Qt.PointingHandCursor
-                          onClicked: root.colourEditing = manageEntry.expanded ? "" : manageEntry.modelData.name
-                        }
-                      }
-
-                      Text {
-                        id: manageName
-                        textFormat: Text.PlainText
-                        anchors.left: colourDot.right
-                        anchors.leftMargin: Style.space(10)
-                        anchors.right: forgetButton.left
-                        anchors.rightMargin: Style.space(10)
-                        anchors.verticalCenter: parent.verticalCenter
-                        elide: Text.ElideRight
-                        text: root.nameAndPlan(manageEntry.modelData)
-                        color: manageEntry.modelData.active ? root.foreground : root.dim
-                        font.family: root.fontFamily
-                        font.pixelSize: Style.font.bodySmall
-                      }
-
-                      Button {
-                        id: forgetButton
-                        anchors.right: parent.right
-                        anchors.verticalCenter: parent.verticalCenter
-                        visible: !manageEntry.modelData.active
-                        text: "forget"
-                        bordered: true
-                        foreground: root.foreground
-                        fontFamily: root.fontFamily
-                        fontSize: Style.font.caption
-                        verticalPadding: Style.space(3)
-                        onClicked: root.forgetAccount(manageEntry.modelData.name)
-                      }
-                    }
-
-                    Row {
-                      visible: manageEntry.expanded
-                      width: parent.width
-                      spacing: Style.space(6)
-                      leftPadding: Style.space(24)
-
-                      Repeater {
-                        model: root.coloursFor(manageEntry.modelData)
-
-                        Rectangle {
-                          required property var modelData
-
-                          width: Style.space(14)
-                          height: width
-                          radius: width / 2
-                          color: modelData
-                          border.width: root.accountColour(manageEntry.modelData) === modelData ? 2 : 0
-                          border.color: root.foreground
-
-                          MouseArea {
-                            anchors.fill: parent
-                            cursorShape: Qt.PointingHandCursor
-                            onClicked: {
-                              root.recolourAccount(manageEntry.modelData.name, parent.modelData)
-                              root.colourEditing = ""
-                            }
-                          }
-                        }
-                      }
-                    }
-                  }
-                }
-
-                Button {
-                  width: parent.width
-                  text: "+ add account"
-                  bordered: true
-                  foreground: root.foreground
-                  fontFamily: root.fontFamily
-                  fontSize: Style.font.caption
-                  verticalPadding: Style.spacing.controlPaddingY
-                  onClicked: root.addAccount()
-                }
-
-                Text {
-                  textFormat: Text.PlainText
-                  width: parent.width
-                  wrapMode: Text.WordWrap
-                  text: (root.provider ? root.provider.addHint : "") + " Click a dot to recolour an account."
-                  color: root.dim
-                  font.family: root.fontFamily
-                  font.pixelSize: Style.font.caption
-                }
-
-                // ---- Weekly pace: the days and hours that earn budget ----
-                PanelSeparator { foreground: root.foreground }
-
-                PanelSectionHeader {
-                  width: parent.width
-                  text: "WEEKLY PACE"
-                  foreground: root.foreground
-                  fontFamily: root.fontFamily
-                }
-
-                Row {
-                  width: parent.width
-                  spacing: Style.space(6)
-                  enabled: root.canWritePace
-
-                  Repeater {
-                    model: ["Working hours", "Every hour"]
-
-                    Button {
-                      required property var modelData
-                      required property int index
-
-                      width: (parent.width - parent.spacing) / 2
-                      text: modelData
-                      bordered: true
-                      selected: (index === 0) === root.paceWorking
-                      hasCursor: root.paceCursor === index
-                      foreground: root.foreground
-                      fontFamily: root.fontFamily
-                      fontSize: Style.font.caption
-                      verticalPadding: Style.spacing.controlPaddingY
-                      onClicked: root.paceActivate(index)
-                    }
-                  }
-                }
-
-                Row {
-                  width: parent.width
-                  spacing: Style.space(4)
-                  enabled: root.canWritePace
-                  opacity: root.paceWorking ? 1 : 0.45
-
-                  Repeater {
-                    model: root.paceDayNames
-
-                    Button {
-                      required property var modelData
-                      required property int index
-
-                      width: (parent.width - parent.spacing * 6) / 7
-                      text: modelData
-                      bordered: true
-                      selected: root.paceDays[root.paceDayOrder[index]]
-                      hasCursor: root.paceCursor === index + 2
-                      foreground: root.foreground
-                      fontFamily: root.fontFamily
-                      fontSize: Style.font.caption
-                      horizontalPadding: Style.space(2)
-                      verticalPadding: Style.spacing.controlPaddingY
-                      onClicked: root.paceActivate(index + 2)
-                    }
-                  }
-                }
-
-                Repeater {
-                  model: [{ label: "Work starts", value: root.paceHours.start, first: 9 },
-                          { label: "Work ends", value: root.paceHours.end, first: 11 }]
-
-                  Item {
-                    required property var modelData
-
-                    width: parent.width
-                    implicitHeight: Math.max(stepLabel.implicitHeight, stepDown.implicitHeight)
-                    opacity: root.paceWorking ? 1 : 0.45
-
-                    Text {
-                      id: stepLabel
-                      textFormat: Text.PlainText
-                      anchors.left: parent.left
-                      anchors.verticalCenter: parent.verticalCenter
-                      text: parent.modelData.label
-                      color: root.dim
-                      font.family: root.fontFamily
-                      font.pixelSize: Style.font.caption
-                    }
-
-                    Row {
-                      anchors.right: parent.right
-                      anchors.verticalCenter: parent.verticalCenter
-                      spacing: Style.space(6)
-                      enabled: root.canWritePace
-
-                      Button {
-                        id: stepDown
-                        text: "\u2212"
-                        bordered: true
-                        hasCursor: root.paceCursor === parent.parent.modelData.first
-                        foreground: root.foreground
-                        fontFamily: root.fontFamily
-                        fontSize: Style.font.caption
-                        horizontalPadding: Style.space(10)
-                        verticalPadding: Style.spacing.controlPaddingY
-                        onClicked: root.paceActivate(parent.parent.modelData.first)
-                      }
-
-                      Text {
-                        textFormat: Text.PlainText
-                        anchors.verticalCenter: parent.verticalCenter
-                        width: Style.space(44)
-                        horizontalAlignment: Text.AlignHCenter
-                        text: Budget.hourText(parent.parent.modelData.value)
-                        color: root.foreground
-                        font.family: root.fontFamily
-                        font.pixelSize: Style.font.bodySmall
-                      }
-
-                      Button {
-                        text: "+"
-                        bordered: true
-                        hasCursor: root.paceCursor === parent.parent.modelData.first + 1
-                        foreground: root.foreground
-                        fontFamily: root.fontFamily
-                        fontSize: Style.font.caption
-                        horizontalPadding: Style.space(10)
-                        verticalPadding: Style.spacing.controlPaddingY
-                        onClicked: root.paceActivate(parent.parent.modelData.first + 1)
-                      }
-                    }
-                  }
-                }
-
-                Text {
-                  textFormat: Text.PlainText
-                  width: parent.width
-                  wrapMode: Text.WordWrap
-                  text: root.canWritePace
-                    ? "Click, or press w and use the arrow keys."
-                    : "This shell cannot save from here. Edit the weekly budget in Omarchy plugin settings."
-                  color: root.dim
-                  font.family: root.fontFamily
-                  font.pixelSize: Style.font.caption
-                }
-
-                // ---- Models shown: which models the panel lists ----
-                PanelSeparator { foreground: root.foreground }
-
-                PanelSectionHeader {
-                  width: parent.width
-                  text: "MODELS SHOWN"
-                  foreground: root.foreground
-                  fontFamily: root.fontFamily
-                }
-
-                Flow {
-                  width: parent.width
-                  spacing: Style.space(6)
-                  enabled: root.canWritePace
-
-                  Repeater {
-                    model: root.modelChips
-
-                    Button {
-                      required property var modelData
-                      required property int index
-
-                      text: modelData.name + " \u00b7 " + usage.formatTokenCount(modelData.total)
-                      bordered: true
-                      selected: modelData.shown
-                      hasCursor: root.modelCursor === index
-                      foreground: root.foreground
-                      fontFamily: root.fontFamily
-                      fontSize: Style.font.caption
-                      verticalPadding: Style.spacing.controlPaddingY
-                      onClicked: root.modelActivate(index)
-                    }
-                  }
-
-                  Button {
-                    visible: root.modelsHiddenText !== ""
-                    text: "Show all"
-                    bordered: true
-                    hasCursor: root.modelCursor === root.modelChips.length
-                    foreground: root.foreground
-                    fontFamily: root.fontFamily
-                    fontSize: Style.font.caption
-                    verticalPadding: Style.spacing.controlPaddingY
-                    onClicked: root.modelActivate(root.modelChips.length)
-                  }
-                }
-
-                Text {
-                  textFormat: Text.PlainText
-                  width: parent.width
-                  wrapMode: Text.WordWrap
-                  text: root.canWritePace
-                    ? "Hides a model from Tokens by model only; no usage is deleted. Click, or press o."
-                    : "This shell cannot save from here. Edit the hidden models in Omarchy plugin settings."
-                  color: root.dim
-                  font.family: root.fontFamily
-                  font.pixelSize: Style.font.caption
-                }
-
-                // ---- How this provider switches ----
-                PanelSeparator { foreground: root.foreground }
-
-                PanelSectionHeader {
-                  width: parent.width
-                  text: "HOW THIS PROVIDER SWITCHES"
-                  foreground: root.foreground
-                  fontFamily: root.fontFamily
-                }
-
-                Item {
-                  width: parent.width
-                  implicitHeight: Math.max(storeLabel.implicitHeight, storeValue.implicitHeight)
-
-                  Text {
-                    id: storeLabel
-                    text: "Login lives in"
-                    color: root.dim
-                    font.family: root.fontFamily
-                    font.pixelSize: Style.font.caption
-                    anchors.left: parent.left
-                    anchors.verticalCenter: parent.verticalCenter
-                  }
-
-                  Text {
-                    id: storeValue
-                    textFormat: Text.PlainText
-                    text: root.provider ? root.provider.store : ""
-                    color: root.foreground
-                    font.family: root.fontFamily
-                    font.pixelSize: Style.font.caption
-                    horizontalAlignment: Text.AlignRight
-                    anchors.left: storeLabel.right
-                    anchors.leftMargin: Style.space(10)
-                    anchors.right: parent.right
-                    anchors.verticalCenter: parent.verticalCenter
-                    elide: Text.ElideMiddle
-                  }
-                }
-
-                Item {
-                  width: parent.width
-                  implicitHeight: Math.max(switchLabel.implicitHeight, switchValue.implicitHeight)
-
-                  Text {
-                    id: switchLabel
-                    text: "A switch"
-                    color: root.dim
-                    font.family: root.fontFamily
-                    font.pixelSize: Style.font.caption
-                    anchors.left: parent.left
-                    anchors.verticalCenter: parent.verticalCenter
-                  }
-
-                  Text {
-                    id: switchValue
-                    textFormat: Text.PlainText
-                    text: root.provider ? root.provider.modeLabel : ""
-                    color: root.foreground
-                    font.family: root.fontFamily
-                    font.pixelSize: Style.font.caption
-                    anchors.right: parent.right
-                    anchors.verticalCenter: parent.verticalCenter
-                  }
-                }
-
-                Text {
-                  textFormat: Text.PlainText
-                  width: parent.width
-                  wrapMode: Text.WordWrap
-                  text: "Why " + (root.provider ? root.provider.how : "")
-                  color: root.dim
-                  font.family: root.fontFamily
-                  font.pixelSize: Style.font.caption
-                }
+              // ---- Settings for every provider ----
+              SettingsPage {
+                host: root
+                visible: root.settingsOpen
+                width: parent.width
               }
 
               // ---- Accounts: the highlighted one is previewed; a switches to it ----
               Flow {
-                visible: root.hasAccounts && !root.managing
+                visible: root.hasAccounts && !root.subView
                 width: parent.width
                 spacing: Style.space(8)
 
@@ -1444,24 +1492,55 @@ Panel {
                   model: root.accounts
 
                   Button {
+                    id: tile
                     required property var modelData
 
                     width: Math.max(Style.space(140), (parent.width - Style.space(8) * (root.accounts.length > 3 ? 2 : root.accounts.length - 1)) / Math.min(root.accounts.length, 3))
-                    text: modelData.name + (modelData.active ? " · active" : "")
-                      + (root.accountPlan(modelData) ? "\n" + root.accountPlan(modelData) + root.peakText(modelData) : "")
+                    implicitHeight: tileText.implicitHeight + Style.space(16)
                     selected: !!root.candidate && modelData.name === root.candidate.name
                     bordered: true
                     foreground: root.accountColour(modelData)
                     fontFamily: root.fontFamily
-                    fontSize: Style.font.bodySmall
-                    verticalPadding: Style.space(4)
+                    Accessible.name: tileName.text + ", " + tileMeta.text
                     onClicked: root.candName = modelData.name
+
+                    // Name and plan on one line; the figure and its age small and dim below.
+                    Column {
+                      id: tileText
+                      anchors.left: parent.left
+                      anchors.right: parent.right
+                      anchors.verticalCenter: parent.verticalCenter
+                      anchors.leftMargin: Style.space(10)
+                      anchors.rightMargin: Style.space(10)
+                      spacing: Style.space(2)
+                      Text {
+                        id: tileName
+                        width: parent.width
+                        elide: Text.ElideRight
+                        textFormat: Text.PlainText
+                        text: root.nameAndPlan(tile.modelData) + (tile.modelData.active ? " · active" : "")
+                        color: tile.foreground
+                        font.family: root.fontFamily
+                        font.pixelSize: Style.font.bodySmall
+                        font.bold: tile.selected
+                      }
+                      Text {
+                        id: tileMeta
+                        width: parent.width
+                        elide: Text.ElideRight
+                        textFormat: Text.PlainText
+                        text: (root.peakText(tile.modelData) !== "" ? root.peakText(tile.modelData).replace(" · ", "") + " · " : "") + Models.agoText(tile.modelData.age).replace("updated ", "")
+                        color: root.dim
+                        font.family: root.fontFamily
+                        font.pixelSize: Style.font.caption
+                      }
+                    }
                   }
                 }
               }
 
               Item {
-                visible: root.hasAccounts && !root.managing
+                visible: root.hasAccounts && !root.subView
                 width: parent.width
                 implicitHeight: Math.max(switchButton.visible ? switchButton.implicitHeight : 0, switchNote.implicitHeight)
 
@@ -1498,7 +1577,7 @@ Panel {
 
               // ---- Status ----
               BorderSurface {
-                visible: !!root.provider && String(root.provider.usageStatusText || "") !== ""
+                visible: !!root.provider && (String(root.provider.usageStatusText || "") !== "" || root.provider.rateLimited === true)
                 width: parent.width
                 implicitHeight: statusText.implicitHeight + Style.spacing.xl * 2
                 color: root.alpha(root.urgent, 0.10)
@@ -1513,7 +1592,7 @@ Panel {
                   anchors.verticalCenter: parent.verticalCenter
                   anchors.leftMargin: Style.space(12)
                   anchors.rightMargin: Style.space(12)
-                  text: root.provider ? String(root.provider.authHelpText || "") : ""
+                  text: Models.helpLine(root.provider)
                   color: root.dim
                   font.family: root.fontFamily
                   font.pixelSize: Style.font.caption
@@ -1587,13 +1666,13 @@ Panel {
 
               // ---- Limits of the highlighted account ----
               PanelSeparator {
-                visible: limitsSection.visible && !root.managing
+                visible: limitsSection.visible && !root.subView
                 foreground: root.foreground
               }
 
               Column {
                 id: limitsSection
-                visible: root.limits.length > 0 && !root.managing
+                visible: root.limits.length > 0 && !root.subView
                 width: parent.width
                 spacing: Style.space(8)
 
@@ -1646,9 +1725,14 @@ Panel {
                   model: root.limits
 
                   LimitRow {
+                    id: limitItem
                     required property var modelData
+                    required property int index
                     width: limitsSection.width
                     window: modelData
+                    opacity: limitStagger.p
+                    transform: Translate { y: (1 - limitStagger.p) * 8 }
+                    StaggerIn { id: limitStagger; reduced: root.reduced; index: limitItem.index + 1; tick: root.enterTick }
                   }
                 }
               }
@@ -1662,7 +1746,7 @@ Panel {
               Column {
                 id: countsSection
                 readonly property var counts: root.candidate && Array.isArray(root.candidate.counts) ? root.candidate.counts : []
-                visible: counts.length > 0 && !root.managing
+                visible: counts.length > 0 && !root.subView
                 width: parent.width
                 spacing: Style.space(8)
 
@@ -1712,13 +1796,13 @@ Panel {
 
               // ---- Tokens by day ----
               PanelSeparator {
-                visible: usageSection.visible && !root.managing
+                visible: usageSection.visible && !root.subView
                 foreground: root.foreground
               }
 
               Column {
                 id: usageSection
-                visible: !root.managing && !!root.provider && root.provider.recentDays && root.provider.recentDays.length > 0
+                visible: !root.subView && !!root.provider && root.provider.recentDays && root.provider.recentDays.length > 0
                 width: parent.width
                 spacing: Style.space(6)
 
@@ -1780,7 +1864,7 @@ Panel {
               // Today, in the other unit people think in. Claude only: the
               // estimate is priced from prices.json, which only knows Claude.
               Text {
-                visible: !root.managing && root.hasAccounts && root.todayCost >= 0
+                visible: !root.subView && root.showCost && root.hasAccounts && root.todayCost >= 0
                   && root.provider && root.provider.providerId === "claude"
                 width: parent.width
                 textFormat: Text.PlainText
@@ -1799,7 +1883,7 @@ Panel {
 
               Column {
                 id: modelSection
-                visible: !root.managing && root.models.length > 0
+                visible: !root.subView && root.models.length > 0
                 width: parent.width
                 spacing: Style.space(6)
 
@@ -1817,10 +1901,9 @@ Panel {
                     required property var modelData
                     width: modelSection.width
                     row: modelData
-                    // Scaled to the heaviest version inside its own family, so each
-                    // family's top row is full — the scale-to-peak the weekly chart
-                    // uses for its busiest day. A family header draws no bar.
-                    share: modelData.header ? 0 : modelData.total / Math.max(1, modelData.peak)
+                    // Bar = this version's share of its family, labelled in %.
+                    // A family header draws no bar.
+                    share: modelData.header ? 0 : Models.shareOf(modelData.total, modelData.peak)
                   }
                 }
               }
@@ -1849,13 +1932,11 @@ Panel {
           Repeater {
             model: root.paceCursor >= 0
               ? [{ k: "↑ ↓ ← →", l: "move" }, { k: "enter", l: "change" }, { k: "w", l: "back" }]
+              : root.autoCursor >= 0
+              ? [{ k: "↑ ↓ ← →", l: "move" }, { k: "enter", l: "change" }, { k: "s", l: "back" }]
               : root.modelCursor >= 0
               ? [{ k: "↑ ↓ ← →", l: "move" }, { k: "enter", l: "show/hide" }, { k: "o", l: "back" }]
-              : root.hasAccounts
-                ? [{ k: "↑ ↓", l: "provider" }, { k: "← →", l: "account" }, { k: "a", l: "switch" }, { k: "m", l: "manage" }].concat(root.managing ? [{ k: "w", l: "weekly pace" }, { k: "o", l: "models" }] : [])
-                : root.canManage
-                  ? [{ k: "↑ ↓", l: "provider" }, { k: "m", l: "manage" }, { k: "r", l: "refresh" }].concat(root.managing ? [{ k: "w", l: "weekly pace" }, { k: "o", l: "models" }] : [])
-                  : [{ k: "↑ ↓", l: "provider" }, { k: "r", l: "refresh" }]
+              : Models.keyHints(root.hasAccounts, root.canManage, root.managing, root.canAutoSwitch, root.settingsOpen, root.canSwitchAccounts)
 
             Row {
               required property var modelData
@@ -1884,120 +1965,106 @@ Panel {
     }
   }
 
-  // "next message" and its kin: how a switch reaches a session that is already open.
-  component ModePill: Rectangle {
-    property string label: "next message"
-
-    implicitWidth: pillText.implicitWidth + Style.space(12)
-    implicitHeight: pillText.implicitHeight + Style.space(2)
-    radius: height / 2
-    color: "transparent"
-    border.width: 1
-    border.color: root.alpha(root.foreground, 0.5)
-
-    Text {
-      id: pillText
-      anchors.centerIn: parent
-      textFormat: Text.PlainText
-      text: parent.label
-      color: root.dim
-      font.family: root.fontFamily
-      font.pixelSize: Style.font.caption
-      font.bold: true
-    }
-  }
-
   // One provider in the left column: name, account and plan, how full it is.
-  component ProviderRow: MouseArea {
-    id: providerRow
+  // One provider in the strip: a mini gauge and its name. The selected chip
+  // lifts 2px, sits on a soft shadow and glows in its account hue.
+  component ProviderChip: MouseArea {
+    id: chip
     property var provider: null
     property bool selected: false
+    property int position: 0
 
     // Its own active account, never root.activeAccount: that one belongs to
-    // whichever provider is selected, and a row for another provider must
+    // whichever provider is selected, and a chip for another provider must
     // never borrow it.
     readonly property var rowActive: root.activeAccountFor(provider)
     readonly property var windows: root.providerWindows(provider, rowActive)
     readonly property var tight: root.tightest(windows)
-    readonly property bool hasAccounts: !!provider && (provider.accounts || []).length > 0
+    readonly property color hue: root.accountColour(rowActive)
+    property real lift: selected ? Style.space(2) : 0
 
-    implicitHeight: rowBody.implicitHeight + Style.space(16)
+    implicitHeight: Style.space(52)
     hoverEnabled: true
     cursorShape: Qt.PointingHandCursor
+    activeFocusOnTab: false
+    Accessible.role: Accessible.Button
+    Accessible.name: chip.provider
+      ? Models.barSummary(chip.provider.providerName, chip.rowActive ? chip.rowActive.name : "", chip.tight ? chip.tight.percent : -1)
+        + (chip.selected ? ", selected" : "") : ""
+
+    opacity: stagger.p
+    transform: Translate { y: (1 - stagger.p) * 8 - chip.lift }
+    StaggerIn { id: stagger; reduced: root.reduced; index: chip.position; tick: root.stripTick }
+
+    Behavior on lift { NumberAnimation { duration: root.dur(260); easing.type: Easing.OutBack; easing.overshoot: 1.6 } }
+    // Press feedback: the chip gives a little under the finger.
+    scale: pressed ? 0.97 : 1
+    Behavior on scale { NumberAnimation { duration: root.dur(120); easing.type: Easing.OutCubic } }
+
+    Rectangle {
+      visible: chip.selected
+      anchors.fill: parent
+      anchors.topMargin: Style.space(2)
+      radius: Style.cornerRadius
+      color: root.alpha("#000000", 0.18)
+    }
 
     Rectangle {
       anchors.fill: parent
       radius: Style.cornerRadius
-      color: providerRow.selected ? root.alpha(root.foreground, 0.12)
-           : providerRow.containsMouse ? root.alpha(root.foreground, 0.06) : "transparent"
+      color: chip.selected ? root.track
+           : chip.containsMouse ? root.alpha(root.foreground, 0.06) : "transparent"
+      border.width: chip.selected ? 1 : 0
+      border.color: root.alpha(Color.accent, 0.45)
     }
 
-    Rectangle {
-      visible: providerRow.selected
-      width: Style.space(3)
-      height: parent.height
-      color: root.foreground
-    }
-
-    Column {
-      id: rowBody
+    Row {
+      anchors.verticalCenter: parent.verticalCenter
       anchors.left: parent.left
       anchors.right: parent.right
-      anchors.verticalCenter: parent.verticalCenter
-      anchors.leftMargin: Style.space(12)
-      anchors.rightMargin: Style.space(10)
-      spacing: Style.space(3)
+      anchors.leftMargin: Style.space(10)
+      anchors.rightMargin: Style.space(8)
+      spacing: Style.space(8)
 
-      Text {
-        textFormat: Text.PlainText
-        width: parent.width
-        elide: Text.ElideRight
-        text: providerRow.provider ? providerRow.provider.providerName : ""
-        color: root.foreground
-        font.family: root.fontFamily
-        font.pixelSize: Style.font.bodySmall
-        font.bold: true
+      Gauge {
+        id: chipGauge
+        reduced: root.reduced
+        anchors.verticalCenter: parent.verticalCenter
+        size: Style.space(30)
+        thickness: Style.space(4)
+        value: chip.tight ? chip.tight.percent : -1
+        alarm: !!chip.tight && chip.tight.percent >= 0.9
+        trackColor: root.alpha(root.foreground, 0.2)
+        valueColor: chip.hue
+        alarmColor: root.urgent
       }
 
-      Text {
-        textFormat: Text.PlainText
-        width: parent.width
-        elide: Text.ElideRight
-        text: providerRow.rowActive
-          ? root.nameAndPlan(providerRow.rowActive)
-          : root.heroMeta(providerRow.provider)
-        color: root.dim
-        font.family: root.fontFamily
-        font.pixelSize: Style.font.caption
-      }
+      Column {
+        anchors.verticalCenter: parent.verticalCenter
+        width: parent.width - chipGauge.width - parent.spacing
+        spacing: Style.space(1)
 
-      Row {
-        visible: !!providerRow.tight
-        width: parent.width
-        spacing: Style.space(8)
-
-        Meter {
-          width: parent.width - percentLabel.width - parent.spacing
-          anchors.verticalCenter: parent.verticalCenter
-          value: providerRow.tight ? providerRow.tight.percent : -1
-          alarming: !!providerRow.tight && providerRow.tight.percent >= 0.9
+        Text {
+          textFormat: Text.PlainText
+          width: parent.width
+          elide: Text.ElideRight
+          text: chip.provider ? chip.provider.providerName : ""
+          color: root.foreground
+          font.family: root.fontFamily
+          font.pixelSize: Style.font.bodySmall
+          font.bold: true
         }
 
         Text {
-          id: percentLabel
           textFormat: Text.PlainText
-          width: Style.space(34)
-          horizontalAlignment: Text.AlignRight
-          text: providerRow.tight ? Math.round(providerRow.tight.percent * 100) + "%" : ""
+          width: parent.width
+          elide: Text.ElideRight
+          text: (chip.tight ? Math.round(chip.tight.percent * 100) + "% · " : "")
+            + (chip.rowActive ? chip.rowActive.name : root.heroMeta(chip.provider))
           color: root.dim
           font.family: root.fontFamily
           font.pixelSize: Style.font.caption
         }
-      }
-
-      ModePill {
-        visible: providerRow.hasAccounts
-        label: providerRow.provider ? providerRow.provider.modeLabel : ""
       }
     }
   }
@@ -2039,7 +2106,7 @@ Panel {
         id: limitValue
         textFormat: Text.PlainText
         text: limitRow.window && limitRow.window.percent >= 0
-          ? Math.round(limitRow.window.percent * 100) + "%"
+          ? Math.round(limitRow.window.percent * 100) + "%" + (limitRow.alarming ? " !" : "")
           : "—"
         color: limitRow.alarming ? root.urgent : root.foreground
         font.family: root.fontFamily
@@ -2062,7 +2129,7 @@ Panel {
 
       // Where the budget says you should be by now.
       Rectangle {
-        visible: !!limitRow.pace && limitRow.pace.state !== "early"
+        visible: !!limitRow.pace && limitRow.pace.state !== "early" && limitRow.window.percent > 0
         width: 2
         height: rowMeter.implicitHeight + Style.space(6)
         color: root.urgent
@@ -2074,13 +2141,13 @@ Panel {
     CaptionText {
       visible: !!limitRow.pace
       text: limitRow.window ? Budget.paceLine(limitRow.window.percent, limitRow.pace) : ""
-      color: limitRow.pace && limitRow.pace.state === "over" ? root.foreground : root.dim
+      color: root.foreground
     }
 
     CaptionText {
       text: limitRow.window ? Budget.forecastLine(limitRow.window.percent, limitRow.pace,
                                                   limitRow.resetMs, root.nowMs) : ""
-      color: limitRow.pace && (limitRow.pace.full || limitRow.pace.projected > 1) ? root.urgent : root.dim
+      color: limitRow.pace && (limitRow.pace.full || limitRow.pace.projected > 1) ? root.urgent : root.foreground
     }
 
     CaptionText { text: root.resetText(limitRow.window) }
@@ -2102,6 +2169,8 @@ Panel {
     id: meter
     property real value: -1
     property bool alarming: false
+    Accessible.role: Accessible.ProgressBar
+    Accessible.name: value >= 0 ? Math.round(value * 100) + " percent used" + (alarming ? ", nearly full" : "") : "no data"
     property real thickness: Math.max(Style.space(4), Math.round(Style.spacing.controlHeight * 0.14))
 
     implicitHeight: thickness
@@ -2122,7 +2191,7 @@ Panel {
       color: meter.alarming ? root.urgent : root.foreground
 
       Behavior on width {
-        NumberAnimation { duration: 160; easing.type: Easing.OutCubic }
+        NumberAnimation { duration: root.dur(160); easing.type: Easing.OutCubic }
       }
     }
 
@@ -2145,7 +2214,6 @@ Panel {
       anchors.bottomMargin: Style.space(4)
 
       Rectangle {
-        anchors.horizontalCenter: parent.horizontalCenter
         anchors.bottom: parent.bottom
         width: Math.min(parent.width, Style.space(28))
         height: Math.max(Style.space(3), parent.height * root.clamp(dayBar.ratio, 0, 1))
@@ -2153,7 +2221,7 @@ Panel {
         color: dayBar.today ? root.foreground : root.alpha(root.foreground, 0.55)
 
         Behavior on height {
-          NumberAnimation { duration: 160; easing.type: Easing.OutCubic }
+          NumberAnimation { duration: root.dur(160); easing.type: Easing.OutCubic }
         }
       }
     }
@@ -2210,7 +2278,7 @@ Panel {
       color: root.alpha(root.foreground, 0.14)
 
       Behavior on width {
-        NumberAnimation { duration: 160; easing.type: Easing.OutCubic }
+        NumberAnimation { duration: root.dur(160); easing.type: Easing.OutCubic }
       }
     }
 
@@ -2233,7 +2301,9 @@ Panel {
     Text {
       id: modelTokens
       textFormat: Text.PlainText
-      text: modelRow.row ? usage.formatTokenCount(modelRow.row.total) : ""
+      text: !modelRow.row ? ""
+        : modelRow.row.header ? usage.formatTokenCount(modelRow.row.total)
+        : Models.shareText(modelRow.row.total, modelRow.row.peak) + " · " + usage.formatTokenCount(modelRow.row.total)
       color: root.dim
       font.family: root.fontFamily
       font.pixelSize: Style.font.bodySmall

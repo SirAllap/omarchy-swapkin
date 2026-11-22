@@ -197,12 +197,20 @@ Item {
   }
 
   function updateCommand(kind, agentIds) {
-    var command = ["omarchy-agent-usage-update"]
-    if (kind === "force") command.push("--force")
-    if (kind === "limits") command.push("--limits-only")
-    // Claude only: the other collectors belong to Omarchy's own Agents panel.
-    command.push("claude")
-    return command
+    var flag = kind === "force" ? "--force" : (kind === "limits" ? "--limits-only" : "")
+    // Claude always, plus each swapkin provider that has an Omarchy collector
+    // (omarchy-agent-usage-<id>); the shell checks, so copilot (none) is skipped.
+    var list = swapkinData && swapkinData.providers ? swapkinData.providers : []
+    var ids = []
+    for (var i = 0; i < list.length; i++) {
+      var id = String(list[i].id || "")
+      if (id !== "claude" && /^[a-z0-9_-]+$/.test(id)) ids.push(id)
+    }
+    var script = 'flag="$1"; shift; ids=claude; for id in "$@"; do ' +
+      'if [ -x "${OMARCHY_PATH:-/usr/share/omarchy}/bin/omarchy-agent-usage-$id" ] || ' +
+      'command -v "omarchy-agent-usage-$id" >/dev/null 2>&1; then ids="$ids $id"; fi; done; ' +
+      'exec omarchy-agent-usage-update $flag $ids'
+    return ["sh", "-c", script, "sh", flag].concat(ids)
   }
 
   function runUpdate(kind, agentIds) {
@@ -304,7 +312,7 @@ Item {
     return numberValue(p.totalPrompts) > 0 || numberValue(p.totalSessions) > 0
       || numberValue(p.activeDays) > 0 || numberValue(p.todayPrompts) > 0
       || numberValue(p.todaySessions) > 0 || (p.limits && p.limits.length > 0)
-      || !!p.balance || (p.accounts && p.accounts.length > 0)
+      || !!p.balance || (p.accounts && p.accounts.length > 0) || p.signedIn === true
   }
 
   // A prepaid agent's credit ledger. Like rate limits, the balance is
@@ -321,6 +329,15 @@ Item {
       currency: String(raw.currency || "USD"),
       estimated: raw.estimated === true
     }
+  }
+
+  // The plan name swapkin took from the API for the active account. Omarchy's
+  // own record rebuilds a label from the rate tier, so it is only the fallback.
+  function activePlanName(sp) {
+    var accs = sp && Array.isArray(sp.accounts) ? sp.accounts : []
+    for (var i = 0; i < accs.length; i++)
+      if (accs[i].active === true) return String(accs[i].plan || "")
+    return ""
   }
 
   function displayProvider(record) {
@@ -340,7 +357,7 @@ Item {
       // Rate limits and balances stay per-account and are never merged
       // across devices.
       limits: Array.isArray(record.limits) ? record.limits : [],
-      tierLabel: String(record.tierLabel || ""),
+      tierLabel: activePlanName(sp) || String(record.tierLabel || ""),
       balance: balanceValue(record.balance),
 
       todayPrompts: synced ? numberValue(stats.todayPrompts) : numberValue(record.todayPrompts),
@@ -368,7 +385,10 @@ Item {
       sessions: sp ? numberValue(sp.sessions) : 0,
       store: sp ? String(sp.store || "") : "",
       how: sp ? String(sp.how || "") : "",
-      addHint: sp ? String(sp.addHint || "") : ""
+      addHint: sp ? String(sp.addHint || "") : "",
+      signedIn: sp ? sp.signedIn === true : false,
+      rateLimited: sp ? sp.rateLimited === true : false,
+      rateLimitedUntilMs: sp ? Number(sp.rateLimitedUntilMs || 0) : 0
     }
   }
 

@@ -133,6 +133,21 @@ next_colour() { next_colour_id "$P_ID" "$P_MARKER" "${1:-$RANDOM}"; }
 set_colour() { set_colour_id "$P_ID" "$P_MARKER" "$1" "$2"; }
 account_dir() { echo "$(provider_root "$P_ID")/$1"; } # name
 set_active() { echo "$1" > "$(provider_active_file "$P_ID")"; } # name
+# A display name the owner chose for an account. The account id (its folder)
+# never changes, so no stored path or pointer can break; only what is shown.
+label_of() { head -c 40 "$(account_dir "$1")/label" 2>/dev/null | tr -d '\n\r\t' || true; } # name
+cmd_label() { # name [text]
+  local name="$1" text="${2:-}" dir
+  valid_name "$name"
+  dir=$(account_dir "$name")
+  [[ -d $dir ]] || die "no account named '$name'"
+  text=$(printf '%s' "$text" | tr -d '[:cntrl:]')
+  text="${text:0:32}"
+  if [[ -z ${text//[[:space:]]/} ]]; then rm -f "$dir/label"; echo "Cleared the label of '$name'."; return; fi
+  printf '%s' "$text" > "$dir/label.tmp"
+  mv "$dir/label.tmp" "$dir/label"
+  echo "'$name' is shown as '$text'."
+}
 
 # --- custom provider config (~/.config/swapkin/providers.json) ---
 custom_config_file() { echo "${XDG_CONFIG_HOME:-$HOME/.config}/swapkin/providers.json"; }
@@ -168,7 +183,7 @@ custom_entry() { # id
   jq -c --arg id "$1" '[.providers[]? | select(.id==$id)][0] // empty' "$(custom_config_file)" 2>/dev/null
 }
 
-BUILTIN_IDS=(claude codex copilot)
+BUILTIN_IDS=(claude codex copilot agy)
 
 all_provider_ids() {
   local id seen=()
@@ -193,7 +208,7 @@ all_provider_ids() {
 load_adapter() { # id
   local id="$1"
   case "$id" in
-    claude|codex|copilot)
+    claude|codex|copilot|agy)
       # shellcheck source=/dev/null
       source "$PROVIDERS_DIR/$id.sh"
       ;;
@@ -344,8 +359,8 @@ cmd_list() { # --json or empty
       local dir; dir=$(account_dir "$name")
       local usage age; { read -r usage; read -r age; } < <(usage_of "$dir")
       rows+=("$(jq -c -n --arg name "$name" --arg cur "$cur" --arg colour "$(colour_of "$name")" \
-        --arg plan "$(acct_plan "$name")" --argjson age "$age" --argjson usage "$usage" \
-        '{name: $name, plan: $plan, active: ($name == $cur), colour: $colour, age: $age}
+        --arg plan "$(acct_plan "$name")" --arg label "$(label_of "$name")" --argjson age "$age" --argjson usage "$usage" \
+        '{name: $name, label: $label, plan: $plan, active: ($name == $cur), colour: $colour, age: $age}
          + $usage
          + {weekly: (($usage.limits // []) | map(select((.label // "") | ascii_downcase | test("week")))[0].percent // null)}')")
     done
@@ -368,7 +383,26 @@ provider_entry_json() { # id
     if declare -F p_installed >/dev/null && p_installed 2>/dev/null; then installed=true; fi
     local has_accounts=""
     has_accounts=$(profiles | head -1)
-    [[ $installed == true || -n $has_accounts ]] || exit 0
+    # Listed when swapkin saved an account, or the provider's own CLI is logged
+    # in (p_has_login). A CLI on PATH, or a shared login like gh, is not enough.
+    if [[ -z $has_accounts ]]; then
+      declare -F p_has_login >/dev/null && p_has_login 2>/dev/null || exit 0
+    fi
+
+    # Read-only: does the tool itself hold a login right now? The panel shows
+    # one that swapkin has not saved yet as "signed in, not saved".
+    local signed_in=false
+    if declare -F p_has_login >/dev/null && p_has_login 2>/dev/null; then signed_in=true; fi
+
+    # An account whose last probe was rate limited in the past 10 minutes.
+    local rate_limited=false rl until_ms=0 u
+    for rl in "$(provider_root "$P_ID")"/*/ratelimit; do
+      [[ -f $rl ]] && (( $(date +%s) - $(stat -c %Y "$rl") < 600 )) && rate_limited=true
+      u=$(cat "$rl.until" 2>/dev/null || echo 0)
+      [[ $u =~ ^[0-9]+$ ]] && (( u * 1000 > until_ms )) && until_ms=$((u * 1000))
+    done
+    # A known retry time keeps the flag on until then, however old the marker.
+    (( until_ms > $(date +%s) * 1000 )) && rate_limited=true
 
     local sessions=0
     declare -F p_sessions >/dev/null && sessions=$(p_sessions 2>/dev/null || echo 0)
@@ -388,8 +422,8 @@ provider_entry_json() { # id
       local dir; dir=$(account_dir "$name")
       local usage age; { read -r usage; read -r age; } < <(usage_of "$dir")
       accounts=$(jq -c -n --argjson accs "$accounts" --arg name "$name" --arg cur "$cur" \
-        --arg colour "$(colour_of "$name")" --arg plan "$(acct_plan "$name")" --argjson age "$age" --argjson usage "$usage" \
-        '$accs + [{name:$name, active: ($name == $cur), colour: $colour, plan: $plan, age: $age,
+        --arg colour "$(colour_of "$name")" --arg plan "$(acct_plan "$name")" --arg label "$(label_of "$name")" --argjson age "$age" --argjson usage "$usage" \
+        '$accs + [{name:$name, label:$label, active: ($name == $cur), colour: $colour, plan: $plan, age: $age,
                     limits: (($usage.limits) // []), counts: (($usage.counts) // []), note: (($usage.note) // ""),
                     tierLabel: (($usage.tierLabel) // ""), updatedAt: (($usage.updatedAt) // "")}
                    + {weekly: ((($usage.limits) // []) | map(select((.label // "") | ascii_downcase | test("week")))[0].percent // null)}]')
@@ -397,8 +431,8 @@ provider_entry_json() { # id
 
     jq -n --arg id "$P_ID" --arg name "$P_NAME" --arg mode "$P_MODE" --arg modeLabel "$mode_label" \
       --arg modeWords "$mode_words" --arg store "$P_STORE" --arg how "$P_HOW" --arg addHint "$P_ADD_HINT" \
-      --argjson installed "$installed" --argjson sessions "$sessions" --argjson accounts "$accounts" \
-      '{id:$id, name:$name, mode:$mode, modeLabel:$modeLabel, modeWords:$modeWords, store:$store, how:$how,
+      --argjson installed "$installed" --argjson signedIn "$signed_in" --argjson rateLimited "$rate_limited" --argjson rateLimitedUntilMs "$until_ms" --argjson sessions "$sessions" --argjson accounts "$accounts" \
+      '{id:$id, signedIn:$signedIn, rateLimited:$rateLimited, rateLimitedUntilMs:$rateLimitedUntilMs, name:$name, mode:$mode, modeLabel:$modeLabel, modeWords:$modeWords, store:$store, how:$how,
         addHint:$addHint, installed:$installed, sessions:$sessions, accounts:$accounts}'
   )
 }
@@ -487,6 +521,8 @@ Usage: swapkin [-p|--provider ID] <command>
   add [name]      Save a new account (the first one is your current login)
   colour <name> <#rrggbb>
                   Set the colour that marks this account
+  label <name> [text]
+                  Show an account under another name (no text clears it)
   use <name>      Switch every session for this provider to <name>
   remove <name>   Forget a saved account
   save            Store the live login back into the active account (hot only)
@@ -495,7 +531,7 @@ Usage: swapkin [-p|--provider ID] <command>
   cost            Today's tokens priced at API rates (an estimate, as JSON)
   statusline      The active account, coloured, for a status line
   providers --json
-                  Every provider, installed or with saved accounts, as JSON
+                  Every provider with a saved account or its own CLI login, as JSON
   env [id]        export KEY=value lines for a cold provider's active account
   run <id> [-- args]
                   Exec that provider's CLI with its active account's env
@@ -539,7 +575,7 @@ if demo_active; then
     status) demo_status "$provider"; exit 0 ;;
     statusline) demo_statusline "$provider" "${2:-}"; exit 0 ;;
     cost) demo_cost; exit 0 ;;
-    use|save|add|remove|colour|color|usage|check|env|run)
+    use|save|add|remove|colour|color|label|usage|check|env|run)
       # stderr, not stdout: `env`'s output is meant for `eval "$(swapkin env)"`
       # in a shell rc, and this message would otherwise break that eval (L7).
       echo "swapkin: demo mode, nothing changed" >&2
@@ -548,7 +584,7 @@ if demo_active; then
 fi
 
 case "$cmd" in
-  use|save|add|remove|colour|color)
+  use|save|add|remove|colour|color|label)
     load_adapter "$provider" || die "unknown provider '$provider'"
     mkdir -p "$(provider_root "$P_ID")"
     exec 9>"$ACCOUNTS/.lock"
@@ -563,6 +599,7 @@ case "$cmd" in
       add) declare -F p_add >/dev/null || die "add is not supported for $provider"; p_add "${2:-}" "${3:-}" ;;
       colour|color) set_colour "${2:?usage: swapkin colour <name> <#rrggbb>}" "${3:?usage: swapkin colour <name> <#rrggbb>}" ;;
       remove) cmd_remove "${2:?usage: swapkin remove <name>}" ;;
+      label) cmd_label "${2:?usage: swapkin label <name> [text]}" "${3:-}" ;;
       save) declare -F p_save >/dev/null && p_save || die "save is not supported for $provider" ;;
     esac ;;
   status)
@@ -586,6 +623,9 @@ case "$cmd" in
   check)
     load_adapter claude
     claude_check ;;
+  note)  # one line in the watchdog log, written by the shell side of the watchdog
+    load_adapter claude
+    auto_log "${2:-}" ;;
   cost)
     load_adapter "$provider" || die "unknown provider '$provider'"
     if declare -F p_cost >/dev/null; then p_cost; else echo '{"today":null}'; fi ;;

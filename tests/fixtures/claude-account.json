@@ -1,0 +1,10 @@
+{
+  "oauthAccount": {
+    "accountUuid": "11111111-2222-3333-4444-555555555555",
+    "billingType": "stripe_subscription",
+    "organizationRateLimitTier": "default_claude_max_20x",
+    "planDisplayName": "Ultra",
+    "subscriptionCreatedAt": "2026-11-01T00:00:00Z",
+    "userRateLimitTier": "default_claude_max_20x"
+  }
+}
