@@ -831,6 +831,27 @@ else
   rm -rf "$SYNC_DIR"
 fi
 
+# ====================== 22b. a peer symlink is never written through ==
+echo "22b. sync snapshot write refuses a symlinked target; scan skips symlinked peers"
+W_DIR=$(mktemp -d); W_OUT=$(mktemp -d)
+echo "precious" > "$W_OUT/victim.txt"
+ln -s "$W_OUT/victim.txt" "$W_DIR/laptop.json"
+bash "$ROOT/bin/sync-write.sh" "$W_DIR" laptop.json '{"providers":{}}' 2>/dev/null; w_rc=$?
+assert_eq "write to a symlinked snapshot is refused (exit 3)" "3" "$w_rc"
+assert_eq "the file outside the folder is untouched" "precious" "$(cat "$W_OUT/victim.txt")"
+rm "$W_DIR/laptop.json"
+bash "$ROOT/bin/sync-write.sh" "$W_DIR" laptop.json '{"providers":{}}'; w_rc=$?
+assert_eq "a plain target is written" "0" "$w_rc"
+assert_contains "snapshot content landed" "$(cat "$W_DIR/laptop.json")" '"providers"'
+assert_eq "no temp files left behind" "1" "$(ls -A "$W_DIR" | wc -l)"
+echo '{"providers":{"evil":{}}}' > "$W_OUT/secret.json"
+ln -s "$W_OUT/secret.json" "$W_DIR/peer.json"
+[[ -n "${SYNC_SCRIPT:-}" ]] || bad "scan script extracted by test 22"
+scan_out=$(bash -c "$SYNC_SCRIPT" "$W_DIR")
+assert_not_contains "a symlinked peer file is not read" "$scan_out" "peer.json"
+assert_contains "a regular snapshot is still read" "$scan_out" "laptop.json"
+rm -rf "$W_DIR" "$W_OUT"
+
 # ============================================== 21. auto-switch near the limit ==
 # Fake accounts under a temp SWAPKIN_DIR with hand-written usage.json files.
 # `swapkin check` is the real entry point; no omarchy-agent-usage-claude stub is

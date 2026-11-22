@@ -464,12 +464,20 @@ Item {
     }
   }
 
-  FileView {
-    id: syncSnapshotFile
-    path: root.syncSnapshotPath
-    watchChanges: false
-    atomicWrites: true
-    printErrors: false
+  // Writes go through bin/sync-write.sh, which refuses a symlinked target and
+  // renames a temp file inside the folder (FileView/QSaveFile would follow it).
+  Process {
+    id: syncWriteProcess
+    running: false
+    onRunningChanged: root.updateSyncRunning()
+    onExited: function(exitCode) {
+      if (exitCode !== 0 && root.syncConfigured()) root.syncStatusText = "Usage sync write refused"
+      root.startSyncScan()
+    }
+    stderr: StdioCollector {
+      waitForEnd: true
+      onStreamFinished: if (text.trim() !== "") console.warn("agents/sync", text.trim())
+    }
   }
 
   FileView {
@@ -503,7 +511,7 @@ Item {
   }
 
   function updateSyncRunning() {
-    root.syncRunning = syncMkdirProcess.running || syncScanProcess.running
+    root.syncRunning = syncMkdirProcess.running || syncWriteProcess.running || syncScanProcess.running
   }
 
   function scheduleSync() {
@@ -529,8 +537,9 @@ Item {
       finishSyncRun()
       return
     }
-    syncSnapshotFile.setText(JSON.stringify(localSnapshot(), null, 2) + "\n")
-    Qt.callLater(root.startSyncScan)
+    syncWriteProcess.command = ["bash", Qt.resolvedUrl("bin/sync-write.sh").toString().replace(/^file:\/\//, ""),
+      root.syncEffectiveDir, root.syncEffectiveFileName, JSON.stringify(localSnapshot(), null, 2)]
+    syncWriteProcess.running = true
   }
 
   function startSyncScan() {
@@ -547,7 +556,7 @@ Item {
     //   TOTAL_MAX 2 MiB — hard ceiling on the whole scan's stdout, applied with
     //     `head -c` after the loop, so the first two caps being wrong still
     //     cannot make syncScanProcess's StdioCollector grow unbounded.
-    var script = "dir=$0; [[ -d \"$dir\" ]] || exit 0; PER_FILE_MAX=262144; MAX_FILES=32; TOTAL_MAX=2097152; shopt -s nullglob; files=(); for f in \"$dir\"/*.json; do [[ -f \"$f\" ]] || continue; files+=(\"$f\"); done; mapfile -t files < <(for f in \"${files[@]}\"; do printf '%s\\t%s\\n' \"$(stat -c %Y \"$f\" 2>/dev/null || echo 0)\" \"$f\"; done | sort -rn | head -n \"$MAX_FILES\" | cut -f2-); for f in \"${files[@]}\"; do sz=$(stat -c %s \"$f\" 2>/dev/null || echo 0); [[ \"$sz\" -gt \"$PER_FILE_MAX\" ]] && continue; printf '===%s===\\n' \"$f\"; cat \"$f\"; printf '\\n=== EOM ===\\n'; done | head -c \"$TOTAL_MAX\""
+    var script = "dir=$0; [[ -d \"$dir\" ]] || exit 0; PER_FILE_MAX=262144; MAX_FILES=32; TOTAL_MAX=2097152; shopt -s nullglob; files=(); for f in \"$dir\"/*.json; do [[ -L \"$f\" ]] && continue; [[ -f \"$f\" ]] || continue; files+=(\"$f\"); done; mapfile -t files < <(for f in \"${files[@]}\"; do printf '%s\\t%s\\n' \"$(stat -c %Y \"$f\" 2>/dev/null || echo 0)\" \"$f\"; done | sort -rn | head -n \"$MAX_FILES\" | cut -f2-); for f in \"${files[@]}\"; do sz=$(stat -c %s \"$f\" 2>/dev/null || echo 0); [[ \"$sz\" -gt \"$PER_FILE_MAX\" ]] && continue; printf '===%s===\\n' \"$f\"; cat \"$f\"; printf '\\n=== EOM ===\\n'; done | head -c \"$TOTAL_MAX\""
     syncScanProcess.command = ["bash", "-c", script, root.syncEffectiveDir]
     syncScanProcess.running = true
   }
