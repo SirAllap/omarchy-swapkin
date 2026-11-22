@@ -466,9 +466,16 @@ Item {
 
   // Writes go through bin/sync-write.sh, which refuses a symlinked target and
   // renames a temp file inside the folder (FileView/QSaveFile would follow it).
+  property string syncPendingJson: ""
+
   Process {
     id: syncWriteProcess
     running: false
+    stdinEnabled: true
+    onStarted: {
+      write(root.syncPendingJson)
+      stdinEnabled = false
+    }
     onRunningChanged: root.updateSyncRunning()
     onExited: function(exitCode) {
       if (exitCode !== 0 && root.syncConfigured()) root.syncStatusText = "Usage sync write refused"
@@ -537,8 +544,11 @@ Item {
       finishSyncRun()
       return
     }
-    syncWriteProcess.command = ["bash", Qt.resolvedUrl("bin/sync-write.sh").toString().replace(/^file:\/\//, ""),
-      root.syncEffectiveDir, root.syncEffectiveFileName, JSON.stringify(localSnapshot(), null, 2)]
+    // JSON goes on stdin, not argv: activeDates and modelUsage grow with the
+    // years of history, and one argv string is capped at 128 KiB (MAX_ARG_STRLEN).
+    syncPendingJson = JSON.stringify(localSnapshot(), null, 2)
+    syncWriteProcess.command = ["bash", decodeURIComponent(Qt.resolvedUrl("bin/sync-write.sh").toString().replace(/^file:\/\//, "")),
+      root.syncEffectiveDir, root.syncEffectiveFileName]
     syncWriteProcess.running = true
   }
 

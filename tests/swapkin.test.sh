@@ -836,13 +836,17 @@ echo "22b. sync snapshot write refuses a symlinked target; scan skips symlinked 
 W_DIR=$(mktemp -d); W_OUT=$(mktemp -d)
 echo "precious" > "$W_OUT/victim.txt"
 ln -s "$W_OUT/victim.txt" "$W_DIR/laptop.json"
-bash "$ROOT/bin/sync-write.sh" "$W_DIR" laptop.json '{"providers":{}}' 2>/dev/null; w_rc=$?
+echo '{"providers":{}}' | bash "$ROOT/bin/sync-write.sh" "$W_DIR" laptop.json 2>/dev/null; w_rc=$?
 assert_eq "write to a symlinked snapshot is refused (exit 3)" "3" "$w_rc"
 assert_eq "the file outside the folder is untouched" "precious" "$(cat "$W_OUT/victim.txt")"
 rm "$W_DIR/laptop.json"
-bash "$ROOT/bin/sync-write.sh" "$W_DIR" laptop.json '{"providers":{}}'; w_rc=$?
+echo '{"providers":{}}' | bash "$ROOT/bin/sync-write.sh" "$W_DIR" laptop.json; w_rc=$?
 assert_eq "a plain target is written" "0" "$w_rc"
 assert_contains "snapshot content landed" "$(cat "$W_DIR/laptop.json")" '"providers"'
+big=$(python3 -c "print('{\"providers\":{\"x\":\"' + 'A' * 300000 + '\"}}')")
+printf '%s' "$big" | bash "$ROOT/bin/sync-write.sh" "$W_DIR" big.json
+assert_eq "a 300 KB snapshot (over one argv limit) is written whole" "300023" "$(wc -c < "$W_DIR/big.json" | tr -d ' ')"
+rm -f "$W_DIR/big.json"
 assert_eq "no temp files left behind" "1" "$(ls -A "$W_DIR" | wc -l)"
 echo '{"providers":{"evil":{}}}' > "$W_OUT/secret.json"
 ln -s "$W_OUT/secret.json" "$W_DIR/peer.json"
