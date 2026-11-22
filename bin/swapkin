@@ -18,6 +18,7 @@ REPO_ROOT="$(dirname "$SCRIPT_DIR")"
 ACCOUNTS="${SWAPKIN_DIR:-${XDG_DATA_HOME:-$HOME/.local/share}/swapkin}"
 
 die() { echo "swapkin: $*" >&2; exit 1; }
+. "$SCRIPT_DIR/statusline.sh"
 pause() { [[ -t 0 ]] && read -rsn 1 -p "Press any key to close. " && echo || true; }
 fail() { echo "swapkin: $*" >&2; pause; exit 1; }
 
@@ -45,6 +46,21 @@ valid_name() {
   # since it requires an a-z0-9 first character.
   [[ $1 == providers ]] && die "'providers' is a reserved name"
   return 0
+}
+name_ok() { [[ $1 =~ ^[a-z0-9][a-z0-9_-]{0,31}$ && $1 != providers ]]; }
+# 'add' with no name, run in a terminal: ask for one. Prints the chosen name.
+# Re-asks on a bad or taken name; an empty answer takes the suggested default.
+ask_account_name() {
+  local n=2 default name
+  while [[ -e $(account_dir "account$n") ]]; do n=$((n+1)); done
+  default="account$n"
+  while :; do
+    read -rp "Name for this account [$default]: " name || die "no name given"
+    name="${name:-$default}"
+    if ! name_ok "$name"; then echo "Use a-z, 0-9, - and _ (for example: work, personal)." >&2
+    elif [[ -e $(account_dir "$name") ]]; then echo "'$name' already exists. Pick another name." >&2
+    else printf '%s' "$name"; return; fi
+  done
 }
 valid_colour() { [[ $1 =~ ^#[0-9a-fA-F]{6}$ ]] || die "colours look like #7fa7d9"; }
 valid_provider_id() { [[ $1 =~ ^[a-z0-9][a-z0-9_-]{0,31}$ ]]; }
@@ -437,11 +453,13 @@ provider_entry_json() { # id
                    + {weekly: ((($usage.limits) // []) | map(select((.label // "") | ascii_downcase | test("week")))[0].percent // null)}]')
     done
 
-    jq -n --arg id "$P_ID" --arg name "$P_NAME" --arg mode "$P_MODE" --arg modeLabel "$mode_label" \
+    local has_sl=false
+    declare -F p_statusline_status >/dev/null && has_sl=true
+    jq -n --argjson statusline "$has_sl" --arg id "$P_ID" --arg name "$P_NAME" --arg mode "$P_MODE" --arg modeLabel "$mode_label" \
       --arg modeWords "$mode_words" --arg store "$P_STORE" --arg how "$P_HOW" --arg addHint "$P_ADD_HINT" \
       --argjson installed "$installed" --argjson signedIn "$signed_in" --argjson rateLimited "$rate_limited" --argjson rateLimitedUntilMs "$until_ms" --arg reloadPending "$reload_pending" --argjson sessions "$sessions" --argjson accounts "$accounts" \
       '{id:$id, signedIn:$signedIn, rateLimited:$rateLimited, rateLimitedUntilMs:$rateLimitedUntilMs, name:$name, mode:$mode, modeLabel:$modeLabel, modeWords:$modeWords, store:$store, how:$how,
-        addHint:$addHint, installed:$installed, sessions:$sessions, reloadPending:$reloadPending, accounts:$accounts}'
+        addHint:$addHint, statusline:$statusline, installed:$installed, sessions:$sessions, reloadPending:$reloadPending, accounts:$accounts}'
   )
 }
 
@@ -538,6 +556,10 @@ Usage: swapkin [-p|--provider ID] <command>
   check           One watchdog pass for Claude: refresh, warn, hand over when spent
   cost            Today's tokens priced at API rates (an estimate, as JSON)
   statusline      The active account, coloured, for a status line
+  statusline on|off|status
+                  Show or hide it in Claude Code's status line (wraps yours; off = prints nothing)
+  statusline install|uninstall
+                  Only the settings.json wiring, as on/off do it
   providers --json
                   Every provider with a saved account or its own CLI login, as JSON
   install-cli     Link ~/.local/bin/swapkin to this copy (replaces only a symlink)
@@ -582,7 +604,13 @@ if demo_active; then
       fi
       exit 0 ;;
     status) demo_status "$provider"; exit 0 ;;
-    statusline) demo_statusline "$provider" "${2:-}"; exit 0 ;;
+    statusline)
+      case "${2:-}" in
+        install|uninstall|on|off) echo "swapkin: demo mode, nothing changed" >&2 ;;
+        status) echo off ;;
+        *) demo_statusline "$provider" "${2:-}" ;;
+      esac
+      exit 0 ;;
     cost) demo_cost; exit 0 ;;
     use|save|add|remove|colour|color|label|usage|check|env|run)
       # stderr, not stdout: `env`'s output is meant for `eval "$(swapkin env)"`
@@ -596,6 +624,10 @@ case "$cmd" in
   use|save|add|remove|colour|color|label)
     load_adapter "$provider" || die "unknown provider '$provider'"
     mkdir -p "$(provider_root "$P_ID")"
+    if [[ $cmd == add && -z ${2:-} && -t 0 ]]; then
+      declare -F p_add >/dev/null || die "add is not supported for $provider"
+      set -- "$1" "$(ask_account_name)" "${3:-}"
+    fi
     exec 9>"$ACCOUNTS/.lock"
     flock -w 10 9 || die "another switch is still running"
     case "$cmd" in
@@ -641,6 +673,9 @@ case "$cmd" in
     if declare -F p_cost >/dev/null; then p_cost; else echo '{"today":null}'; fi ;;
   statusline)
     load_adapter "$provider" || die "unknown provider '$provider'"
+    case "${2:-}" in
+      install|uninstall|on|off|status) cmd_statusline_setup "$2"; exit $? ;;
+    esac
     declare -F p_statusline >/dev/null && p_statusline "${2:-}" ;;
   providers)
     [[ ${2:-} == --json ]] || { help >&2; exit 2; }

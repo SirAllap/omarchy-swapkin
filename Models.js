@@ -199,7 +199,7 @@ function barSummary(providerName, accountName, percent) {
   return percent >= 0 ? s + " · " + Math.round(percent * 100) + "% used" : s
 }
 
-function keyHints(hasAccounts, canManage, managing, canAuto, settings, canSwitch) {
+function keyHints(hasAccounts, canManage, managing, canAuto, settings, canSwitch, canStatusline) {
   if (settings) return [{ k: "↑ ↓", l: "setting" }, { k: "← →", l: "change" }, { k: "w", l: "weekly pace" }, { k: "o", l: "models" }, { k: ",", l: "back" }]
   if (managing) {
     var acts = [{ k: "← →", l: "account" }]
@@ -209,7 +209,7 @@ function keyHints(hasAccounts, canManage, managing, canAuto, settings, canSwitch
     if (canAuto !== false) acts.push({ k: "s", l: "auto-switch" })
     return [{ k: "↑ ↓", l: "provider" }].concat(acts, [{ k: "r", l: "sync" }, { k: "m", l: "back" }, { k: ",", l: "settings" }])
   }
-  var extra = []
+  var extra = canStatusline === true ? [{ k: "t", l: "status line" }] : []
   var gear = { k: ",", l: "settings" }
   if (hasAccounts)
     return [{ k: "↑ ↓", l: "provider" }, { k: "← →", l: "account" }, { k: "a", l: "switch" }, { k: "m", l: "manage" }, { k: "r", l: "sync" }, gear].concat(extra)

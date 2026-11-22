@@ -196,7 +196,7 @@ assert_contains "restart command used" "$(cat "$S/restart.log")" "app-server dae
 rm -f "$S/restart.log"
 sleep 30 & OPID=$!
 out=$(SWAPKIN_CODEX_PIDS="$OPID" PATH="$S/bin:$PATH" sk "$SWAPKIN" -p codex use work)
-assert_contains "panel told when codex is open" "$out" "the moment the last Codex closes"
+assert_contains "panel told when codex is open" "$out" "finishes by itself the moment the last Codex closes"
 assert_true test ! -e "$S/restart.log"
 kill $DPID $OPID 2>/dev/null
 
@@ -1284,9 +1284,140 @@ esac
   done
 done
 
+echo "panel asks for a name before add"
+pan=$(cat "$ROOT/Panel.qml"); mp=$(cat "$ROOT/ManagePage.qml")
+assert_contains "terminal add always carries a name" "$pan" '" add " + name)'
+assert_not_contains "panel never launches a bare add" "$pan" 'providerId + " add")'
+assert_contains "manage page has a name field" "$mp" "Name for the new account"
+assert_contains "Enter confirms" "$mp" "page.host.addAccountNamed(text.trim())"
+assert_contains "Esc cancels" "$mp" "page.host.addingAccount = false"
+
+echo "statusline install / uninstall (fake HOME only)"
+S=$(sandbox)
+export HOME="$S/home" SWAPKIN_DIR="$S/data" CLAUDE_CONFIG_DIR="$S/home/.claude" \
+       XDG_CONFIG_HOME="$S/config" XDG_STATE_HOME="$S/state" XDG_CACHE_HOME="$S/cache" \
+       PATH="$STUBS:$PATH" SWAPKIN_DEMO=0
+unset SWAPKIN_PROVIDER
+SET="$CLAUDE_CONFIG_DIR/settings.json"
+mkdir -p "$CLAUDE_CONFIG_DIR" "$SWAPKIN_DIR/work"
+echo work > "$SWAPKIN_DIR/active"; jq -n '{colour:"#7fa7d9"}' > "$SWAPKIN_DIR/work/meta.json"
+echo '{"theme":"dark","hooks":{"a":[1]}}' > "$SET"
+assert_eq "status is off first" "off" "$(sk "$SWAPKIN" statusline status)"
+sk "$SWAPKIN" statusline install >/dev/null
+assert_contains "no statusLine: ours is set" "$(jq -r .statusLine.command "$SET")" "swapkin' statusline"
+assert_eq "other settings kept" "dark" "$(jq -r .theme "$SET")"
+assert_eq "backup is the old file" '{"theme":"dark","hooks":{"a":[1]}}' "$(cat "$SET.swapkin-bak")"
+assert_eq "status is on" "on" "$(sk "$SWAPKIN" statusline status)"
+before=$(cat "$SET"); sk "$SWAPKIN" statusline install >/dev/null
+assert_eq "install twice changes nothing" "$before" "$(cat "$SET")"
+sk "$SWAPKIN" statusline uninstall >/dev/null
+assert_eq "uninstall removes only the statusLine" '{"theme":"dark","hooks":{"a":[1]}}' "$(jq -c . "$SET")"
+assert_eq "uninstall twice is fine" "Not installed." "$(sk "$SWAPKIN" statusline uninstall)"
+
+ORIG='{"theme":"dark","statusLine":{"type":"command","command":"cat >/dev/null; echo \"my line\"","padding":2}}'
+echo "$ORIG" > "$SET"
+sk "$SWAPKIN" statusline install >/dev/null
+assert_eq "wrapped: settings point at the wrapper" "$SWAPKIN_DIR/statusline-wrap.sh" "$(jq -r .statusLine.command "$SET")"
+assert_eq "wrapped: padding kept" "2" "$(jq -r .statusLine.padding "$SET")"
+wrapped_out=$(echo '{}' | "$SWAPKIN_DIR/statusline-wrap.sh")
+assert_eq "wrapper prints the original, then @account" $'my line\n'"$(printf '\033[38;2;127;167;217m@work\033[0m')" "$wrapped_out"
+wrapped_set=$(cat "$SET"); sk "$SWAPKIN" statusline install >/dev/null
+assert_eq "wrapped install twice changes nothing" "$wrapped_set" "$(cat "$SET")"
+assert_eq "backup holds the original" "$ORIG" "$(cat "$SET.swapkin-bak")"
+sk "$SWAPKIN" statusline uninstall >/dev/null
+assert_eq "uninstall restores the original exactly" "$(jq -S . <<<"$ORIG")" "$(jq -S . "$SET")"
+assert_true test ! -e "$SWAPKIN_DIR/statusline-wrap.sh"
+
+echo '{ broken' > "$SET"
+out=$(sk "$SWAPKIN" statusline install || true)
+assert_contains "bad JSON is refused" "$out" "not a JSON object"
+assert_eq "bad JSON file untouched" "{ broken" "$(cat "$SET")"
+
+echo "statusline on/off: a setting that swapkin statusline obeys, however it is wired"
+echo '{"theme":"dark"}' > "$SET"; rm -f "$SWAPKIN_DIR/settings.json" "$SET.swapkin-bak"
+assert_eq "no wiring: status off" "off" "$(sk "$SWAPKIN" -p claude statusline status)"
+sk "$SWAPKIN" -p claude statusline on >/dev/null
+assert_contains "on wires settings.json when nothing is wired" "$(jq -r .statusLine.command "$SET")" "swapkin' statusline"
+assert_eq "on: status on" "on" "$(sk "$SWAPKIN" -p claude statusline status)"
+sk "$SWAPKIN" -p claude statusline off >/dev/null
+assert_eq "off unwires what swapkin wired" "null" "$(jq -r '.statusLine // "null"' "$SET")"
+assert_eq "off: status off" "off" "$(sk "$SWAPKIN" -p claude statusline status)"
+assert_eq "off: setting stored" "false" "$(jq -r .statusLine.claude "$SWAPKIN_DIR/settings.json")"
+# the owner's way: his own script calls swapkin statusline
+HAND="$S/home/statusline-command.sh"
+printf '#!/usr/bin/env bash\ncat >/dev/null\necho base\n"%s" statusline\n' "$SWAPKIN" > "$HAND"; chmod +x "$HAND"
+jq -n --arg c "$HAND" '{statusLine:{type:"command",command:$c}}' > "$SET"
+sk "$SWAPKIN" -p claude statusline on >/dev/null
+assert_eq "hand-wired: on changes no wiring" "$HAND" "$(jq -r .statusLine.command "$SET")"
+assert_eq "hand-wired: status on" "on" "$(sk "$SWAPKIN" -p claude statusline status)"
+assert_contains "hand-wired: segment shown when on" "$(echo '{}' | "$HAND")" "@work"
+sk "$SWAPKIN" -p claude statusline off >/dev/null
+assert_eq "hand-wired: off leaves the wiring alone" "$HAND" "$(jq -r .statusLine.command "$SET")"
+assert_eq "hand-wired: off prints nothing from swapkin statusline" "base" "$(echo '{}' | "$HAND")"
+assert_eq "hand-wired: status off" "off" "$(sk "$SWAPKIN" -p claude statusline status)"
+sk "$SWAPKIN" -p claude statusline on >/dev/null
+assert_contains "hand-wired: on again shows it" "$(echo '{}' | "$HAND")" "@work"
+assert_eq "plain --plain also silent when off" "" "$(sk "$SWAPKIN" -p claude statusline off >/dev/null; sk "$SWAPKIN" -p claude statusline --plain)"
+sk "$SWAPKIN" -p claude statusline on >/dev/null
+
+# the owner's real shape: a wrapper script gets his script as a quoted argument
+printf '#!/bin/sh\nexit 0\n' > "$S/home/hook.sh"
+jq --arg c "sh \"$S/home/hook.sh\" 'bash $HAND'" '.statusLine.command = $c' "$SET" > "$SET.t" && mv "$SET.t" "$SET"
+assert_eq "nested hand wiring: status on" "on" "$(sk "$SWAPKIN" -p claude statusline status)"
+sk "$SWAPKIN" -p claude statusline off >/dev/null
+assert_eq "nested hand wiring: off" "off" "$(sk "$SWAPKIN" -p claude statusline status)"
+assert_eq "nested hand wiring: off hides the tag" "" "$(sk "$SWAPKIN" -p claude statusline --plain)"
+sk "$SWAPKIN" -p claude statusline on >/dev/null
+assert_eq "nested hand wiring: on shows the tag" "@work" "$(sk "$SWAPKIN" -p claude statusline --plain)"
+# nothing calls swapkin: status off even though the setting is on
+jq '.statusLine.command = "echo hi"' "$SET" > "$SET.t" && mv "$SET.t" "$SET"
+assert_eq "unrelated status line: status off" "off" "$(sk "$SWAPKIN" -p claude statusline status)"
+jq --arg c "$HAND" '.statusLine.command = $c' "$SET" > "$SET.t" && mv "$SET.t" "$SET"
+out=$(sk "$SWAPKIN" -p codex statusline status || true)
+assert_contains "a provider without the switch says so" "$out" "not supported for codex"
+echo '{"refreshToken":"x"}' > "$SWAPKIN_DIR/work/oauth.json"; echo '{}' > "$SWAPKIN_DIR/work/account.json"
+assert_true jq -e '.providers[] | select(.id=="claude") | .statusline == true' <<<"$(sk "$SWAPKIN" providers --json)"
+assert_true jq -e 'all(.providers[] | select(.id!="claude"); .statusline == false)' <<<"$(sk "$SWAPKIN" providers --json)"
+
+echo "panel row for the status line (main panel, per provider)"
+pn=$(cat "$ROOT/Panel.qml"); sp=$(cat "$ROOT/SettingsPage.qml")
+assert_contains "row label" "$pn" "Show account in status line"
+assert_contains "panel calls on/off for its provider" "$pn" '"statusline", on ? "on" : "off"'
+assert_contains "panel asks status for its provider" "$pn" '"statusline", "status"'
+assert_contains "row only when the provider supports it" "$pn" "root.canStatusline"
+assert_contains "keyboard key t" "$pn" 't === "t" || t === "T"'
+assert_not_contains "no settings-page row" "$sp" "status line"
+
+echo "statusline CLI with -p (claude + codex), fake HOME"
+S=$(sandbox)
+export HOME="$S/home" SWAPKIN_DIR="$S/data" CLAUDE_CONFIG_DIR="$S/home/.claude" \
+       XDG_CONFIG_HOME="$S/config" XDG_STATE_HOME="$S/state" XDG_CACHE_HOME="$S/cache" \
+       PATH="$STUBS:$PATH" SWAPKIN_DEMO=0
+unset CODEX_HOME
+mkdir -p "$HOME" "$CLAUDE_CONFIG_DIR" "$SWAPKIN_DIR/work" "$SWAPKIN_DIR/providers/codex/main"
+echo work > "$SWAPKIN_DIR/active"
+jq -n '{colour:"#d97757"}' > "$SWAPKIN_DIR/work/meta.json"
+echo main > "$SWAPKIN_DIR/providers/codex/active"
+jq -n '{colour:"#7fa7d9"}' > "$SWAPKIN_DIR/providers/codex/main/meta.json"
+jq -n --arg h "$HOME/.codex" '{home:$h}' > "$SWAPKIN_DIR/providers/codex/main/codex.json"
+assert_eq "claude -p status: off before setup" "off" "$("$SWAPKIN" -p claude statusline status)"
+"$SWAPKIN" -p claude statusline install >/dev/null 2>&1
+assert_eq "claude -p status: on after install" "on" "$("$SWAPKIN" -p claude statusline status)"
+"$SWAPKIN" -p claude statusline off >/dev/null 2>&1
+assert_eq "claude -p status: off after off" "off" "$("$SWAPKIN" -p claude statusline status)"
+assert_eq "claude -p --plain is silent while off" "" "$("$SWAPKIN" -p claude statusline --plain)"
+"$SWAPKIN" -p claude statusline on >/dev/null 2>&1
+assert_eq "claude -p status: on after on" "on" "$("$SWAPKIN" -p claude statusline status)"
+assert_eq "claude -p --plain prints the tag" "@work" "$("$SWAPKIN" -p claude statusline --plain)"
+assert_eq "codex -p --plain prints the tag" "@main" "$("$SWAPKIN" -p codex statusline --plain)"
+"$SWAPKIN" -p codex statusline --plain >/dev/null; assert_eq "codex -p --plain exits 0" "0" "$?"
+
 echo "shipped demo data"
 shipped=$(SWAPKIN_DEMO=1 SWAPKIN_DEMO_FILE= "$ROOT/bin/swapkin" providers --json 2>&1 || true)
 assert_true jq -e '.demo and (.providers | length >= 3) and all(.providers[].accounts[].limits[]; (.resetsAt // "") | test("^[0-9]{4}-") or . == "")' <<<"$shipped"
+
+echo "qml duplicate assignments"
+assert_true bash "$HERE/qml-dupes.test.sh"
 
 echo
 echo "$PASS passed, $FAIL failed"
