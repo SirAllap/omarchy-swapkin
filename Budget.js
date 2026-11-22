@@ -160,6 +160,9 @@ function pct(x) { return Math.round(x * 100) + "%" }
 function paceLine(used, p) {
   var head = pct(used) + " used"
   if (!p) return head
+  // Nothing spent yet: there is no pace or budget to talk about.
+  if (!(used > 0)) return "Not used yet"
+  if (p.state === "early") return head + " · too early to judge"
   var verdict = p.state === "early" ? "too early to judge"
     : p.state === "on" ? "on pace"
     : pct(Math.abs(p.diff)) + (p.state === "under" ? " under pace" : " over pace")
@@ -208,11 +211,18 @@ function stepHour(start, end, which, delta) {
   return { start: s, end: e }
 }
 
+// The auto-switch threshold: whole percent left, kept between 1 and 30.
+function stepLeftPct(value, delta) {
+  var v = Math.round(Number(value))
+  if (!(v >= 1)) v = 5
+  return Math.max(1, Math.min(30, v + delta))
+}
+
 function hourText(h) { return (h < 10 ? "0" : "") + h + ":00" }
 
 // Loaded by node for the tests; QML never sees `module`.
 if (typeof module !== "undefined") module.exports = {
   config: config, defaultConfig: defaultConfig, DEFAULTS: DEFAULTS, segments: segments, workMs: workMs, walk: walk,
   pace: pace, whenText: whenText, paceLine: paceLine, forecastLine: forecastLine, resetLine: resetLine,
-  durationText: durationText, toggleDay: toggleDay, stepHour: stepHour, hourText: hourText, daysText: daysText
+  durationText: durationText, toggleDay: toggleDay, stepHour: stepHour, stepLeftPct: stepLeftPct, hourText: hourText, daysText: daysText
 }

@@ -3,7 +3,7 @@
 Switch between several accounts, for several tools, from the Omarchy bar,
 without re-logging in and without losing your sessions.
 
-Swapkin now covers Claude Code, Codex CLI, and Copilot CLI (via `gh`). Each
+Swapkin now covers Claude Code, Codex CLI, Copilot CLI (via `gh`) and Antigravity (`agy`, shown only: it keeps one sign-in). Each
 provider switches its own way — some pick up the new account on their very
 next message, others only for a session you start after the switch — see
 [How switching works](#how-switching-works) below.
@@ -20,7 +20,7 @@ it, so settings, sessions, skills, hooks and MCP logins are untouched.
   enough it never scrolls; on a shorter one the columns scroll inside it.
 - **Switch accounts from the bar.** Every account is a card. Move over one to
   preview its limits, then switch. Keys: `↑` `↓` provider, `←` `→` account,
-  `a` switch, `m` manage (`w` inside it edits the weekly pace), `r` refresh.
+  `a` switch, `m` manage (inside it: `u` use, `n` rename, `c` colour, `f` forget, `v` save the current login), `,` settings (`↑ ↓ ← →` change a row, `w` weekly pace, `o` models), `r` sync (fresh usage for every saved account).
 - **Each account keeps its own colour**, shown in the bar icon, the account list
   and, if you want it, the Claude Code status line.
 - **Limits for every account**, not only the active one: session window, weekly
@@ -164,7 +164,7 @@ it back off. Nothing it does ever reads or writes a real login.
 | `swapkin colour <name> <#rrggbb>` | Set the colour that marks an account |
 | `swapkin remove <name>` | Forget a saved account |
 | `swapkin usage` | Refresh each account's limits |
-| `swapkin check` | One watchdog pass: refresh, warn, hand over |
+| `swapkin check` | One watchdog pass: refresh, warn, auto-switch if on |
 | `swapkin cost` | Today's tokens priced at API rates, as JSON |
 | `swapkin statusline [--plain]` | The active account, coloured, for a status line |
 
@@ -173,13 +173,42 @@ it back off. Nothing it does ever reads or writes a real login.
 Behaviour lives in `~/.local/share/swapkin/config.json`:
 
 ```json
-{ "alertAt": 90, "autoSwitch": false }
+{ "alertAt": 90 }
 ```
 
 - `alertAt` — the weekly percentage that triggers one desktop warning per window.
-- `autoSwitch` — off by default. Turn it on and a spent account hands over to the
-  account with the most room left, with a notification saying so. Left off, you
-  get the warning and decide yourself.
+
+### Auto-switch
+
+Off by default. Turn it on and, when the active account has `autoSwitchLeftPct`
+percent or less left on **any** limit (the 5-hour session, the weekly, or a
+per-model weekly such as Fable), Swapkin switches to the roomiest other account,
+exactly as if you had pressed `a` in the panel. Open sessions follow on their
+next message. Wording in the panel: "Switch automatically when an account has 5% left".
+
+- `autoSwitch` — `true` to enable (default `false`).
+- `autoSwitchLeftPct` — 1 to 30, default 5.
+- `autoSwitchReturn` — default `false`. A switch caused by the session limit does
+  not undo itself when the session resets. With this on, once the account you left
+  has more than the threshold left on every limit and is roomier than the current
+  one, Swapkin switches back, at most once per switch.
+
+They are widget settings (`omarchy bar set io.github.sirallap.swapkin autoSwitch true --json`)
+and also live in the manage screen under AUTO-SWITCH (key `s`); `config.json` is
+still read when a setting was never set from the bar.
+
+The rules, so it never surprises you:
+
+- The target needs a real login, figures from the last 2 hours, and more than the
+  threshold left on every limit. Otherwise nothing switches and you get one
+  "No other account has room" notification per window.
+- One switch per account and limit window. The account you left is not a target
+  until the limit that ran out resets, so two accounts never ping-pong.
+- Stale or unreadable figures mean it does nothing. It takes the same lock as
+  `swapkin use`, so it waits for a switch in progress.
+- Each decision is logged to `~/.local/state/swapkin/autoswitch.log` (last 200 lines).
+- Claude only, like `swapkin check`. Codex and other cold providers need a new
+  sign-in to switch, so they are never switched automatically.
 
 The watchdog interval and the weekly budget are widget settings:
 
@@ -207,7 +236,7 @@ model ids, empty by default).
 ```
 ~/.local/share/swapkin/
   active                  the account in use
-  config.json             alertAt, autoSwitch
+  config.json             alertAt (older setups: autoSwitch*)
   <account>/oauth.json    that account's login        (0600)
   <account>/account.json  its profile keys            (0600)
   <account>/meta.json     its colour
@@ -239,7 +268,7 @@ cut off.
 
 ## Limitations
 
-- Claude Code, Codex CLI and Copilot CLI ship built in; anything else with the
+- Claude Code, Codex CLI, Copilot CLI and Antigravity ship built in; anything else with the
   same shape of login is a `providers.json` entry away.
 - Token history is machine-wide, not per account — the session files do not
   record which account paid for them. Limits *are* per account.

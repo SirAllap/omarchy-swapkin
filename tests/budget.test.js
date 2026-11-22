@@ -97,4 +97,16 @@ assert.deepStrictEqual(B.stepHour(9, 19, "end", -1), { start: 9, end: 18 })
 assert.deepStrictEqual(B.stepHour(20, 10, "start", 1), { start: 20, end: 21 }) // repairs a broken pair first
 assert.strictEqual(B.hourText(9), "09:00")
 assert.strictEqual(B.hourText(24), "24:00")
+// Auto-switch threshold: whole percent, 1-30; a stored oddity falls back to 5.
+assert.strictEqual(B.stepLeftPct(5, 1), 6)
+assert.strictEqual(B.stepLeftPct(30, 1), 30)
+assert.strictEqual(B.stepLeftPct(1, -1), 1)
+assert.strictEqual(B.stepLeftPct("12", -1), 11)
+assert.strictEqual(B.stepLeftPct(undefined, 0), 5)
+assert.strictEqual(B.stepLeftPct(99, 0), 30)
 console.log("budget: all passed")
+
+// No use yet: no pace or budget claim.
+assert.strictEqual(B.paceLine(0, { state: "early", budget: 0.02, diff: -0.02 }), "Not used yet")
+assert.strictEqual(B.paceLine(0.04, { state: "early", budget: 0.02, diff: 0.02 }), "4% used · too early to judge")
+console.log("budget: no-use line ok")

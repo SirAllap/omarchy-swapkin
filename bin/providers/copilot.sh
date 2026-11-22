@@ -17,6 +17,8 @@ P_ADD_HINT="The first account is gh's current active user."
 P_ALWAYS_SWITCH=1
 
 p_installed() { [[ -n $(tool_bin gh) ]]; }
+# gh's active login is a git credential, not Copilot use: only a saved account counts.
+p_has_login() { return 1; }
 p_sessions() { pgrep -x copilot 2>/dev/null | wc -l; }
 
 gh_hosts_json() {
