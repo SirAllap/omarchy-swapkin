@@ -387,6 +387,7 @@ Item {
       store: sp ? String(sp.store || "") : "",
       how: sp ? String(sp.how || "") : "",
       addHint: sp ? String(sp.addHint || "") : "",
+      statusline: sp ? sp.statusline === true : false,
       signedIn: sp ? sp.signedIn === true : false,
       rateLimited: sp ? sp.rateLimited === true : false,
       rateLimitedUntilMs: sp ? Number(sp.rateLimitedUntilMs || 0) : 0

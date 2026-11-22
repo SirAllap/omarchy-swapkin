@@ -143,10 +143,7 @@ pending_login() {
 # The first account is whoever is signed in now. Later ones sign in inside a
 # throwaway config dir, so the shared ~/.claude is never touched by the login.
 p_add() {
-  local name="${1:-}"
-  if [[ -z $name ]]; then
-    read -rp "Name for this account (for example work or personal): " name
-  fi
+  local name="${1:?usage: swapkin add <name>}"
   valid_name "$name"
   [[ -f $(account_dir "$name")/oauth.json ]] && die "'$name' already exists"
 
@@ -392,6 +389,7 @@ p_cost() {
 # A ready-made segment for Claude Code's status line: the active account in its
 # own colour. Print it from your status line command.
 p_statusline() {
+  sl_enabled claude || return 0   # the panel's Off: print nothing, however it is wired
   local name; name=$(active)
   [[ -n $name ]] || return 0
   local colour; colour=$(colour_of "$name")
@@ -403,6 +401,12 @@ p_statusline() {
   printf '\033[38;2;%d;%d;%dm@%s\033[0m' \
     "$((16#${colour:1:2}))" "$((16#${colour:3:2}))" "$((16#${colour:5:2}))" "$name"
 }
+
+p_statusline_install()   { sl_install claude; }
+p_statusline_uninstall() { sl_uninstall; }
+p_statusline_on()        { sl_on claude; }
+p_statusline_off()       { sl_off claude; }
+p_statusline_status()    { sl_status claude; }
 
 p_status() {
   local name; name=$(active)

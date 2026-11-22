@@ -344,6 +344,21 @@ p_probe() { # name
   mv "$dir/usage.json.tmp" "$dir/usage.json"
 }
 
+# The active account as a segment, same shape as Claude's. Codex has no custom
+# status line to put it in; the README shows it in the terminal title instead.
+p_statusline() {
+  local name; name=$(active)
+  [[ -n $name ]] || return 0
+  local colour; colour=$(colour_of "$name")
+  [[ $colour =~ ^#[0-9a-fA-F]{6}$ ]] || colour="#d97757"
+  if [[ ${1:-} == --plain ]]; then
+    printf '@%s' "$name"
+    return
+  fi
+  printf '\033[38;2;%d;%d;%dm@%s\033[0m' \
+    "$((16#${colour:1:2}))" "$((16#${colour:3:2}))" "$((16#${colour:5:2}))" "$name"
+}
+
 p_plan() { jq -r '.tierLabel // empty' "$(account_dir "$1")/usage.json" 2>/dev/null; }
 
 # Auto-switch only hands over to a saved account that has a login on disk.

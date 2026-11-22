@@ -567,6 +567,57 @@ Column {
     onClicked: page.host.addAccount()
   }
 
+  // Name first, then the terminal: Enter confirms, Esc cancels.
+  Loader {
+    active: page.host.addingAccount && page.host.canSwitchAccounts
+    visible: active
+    width: parent.width
+    sourceComponent: Column {
+      spacing: Style.space(4)
+      Rectangle {
+        width: parent.width
+        height: Style.space(28)
+        radius: Style.space(6)
+        color: page.host.alpha(page.host.foreground, 0.08)
+        border.width: 1
+        border.color: page.host.alpha(page.host.foreground, 0.5)
+
+        TextInput {
+          id: addInput
+          anchors.fill: parent
+          anchors.leftMargin: Style.space(8)
+          anchors.rightMargin: Style.space(8)
+          verticalAlignment: TextInput.AlignVCenter
+          maximumLength: 32
+          clip: true
+          text: page.host.freeAccountName()
+          color: page.host.foreground
+          selectionColor: page.host.alpha(page.host.foreground, 0.4)
+          selectedTextColor: page.host.foreground
+          font.family: page.host.fontFamily
+          font.pixelSize: Style.font.body
+          Accessible.name: "Name for the new account"
+          Component.onCompleted: { forceActiveFocus(); selectAll() }
+          onAccepted: page.host.addAccountNamed(text.trim())
+          Keys.onEscapePressed: function(event) {
+            event.accepted = true
+            page.host.addingAccount = false
+            Qt.callLater(function() { page.host.refocusKeys() })
+          }
+        }
+      }
+      Text {
+        width: parent.width
+        wrapMode: Text.WordWrap
+        textFormat: Text.PlainText
+        text: page.host.nameProblem(addInput.text.trim()) || "Enter to sign in, Esc to cancel."
+        color: page.host.dim
+        font.family: page.host.fontFamily
+        font.pixelSize: Style.font.caption
+      }
+    }
+  }
+
   Text {
     visible: page.host.canSwitchAccounts && !!page.provider && page.provider.addHint !== ""
     textFormat: Text.PlainText

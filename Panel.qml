@@ -447,7 +447,7 @@ Panel {
     autoCursor = -1
     modelCursor = -1
     setCursor = -1
-    renaming = ""
+    renaming = ""; addingAccount = false
     actionError = ""
     if (firstProviderSetting !== "" && providerById(firstProviderSetting)) selectedProviderId = firstProviderSetting
     nowMs = Date.now()
@@ -523,7 +523,8 @@ Panel {
     autoCursor = -1
     modelCursor = -1
     setCursor = -1
-    renaming = ""
+    renaming = ""; addingAccount = false
+    readStatusline()
   }
 
   function stepCandidate(direction) {
@@ -545,7 +546,7 @@ Panel {
     managing = !managing
     settingsOpen = false
     colourEditing = ""
-    renaming = ""
+    renaming = ""; addingAccount = false
     actionError = ""
     setCursor = -1
     paceCursor = -1
@@ -557,7 +558,7 @@ Panel {
     settingsOpen = !settingsOpen
     managing = false
     colourEditing = ""
-    renaming = ""
+    renaming = ""; addingAccount = false
     setCursor = -1
     paceCursor = -1
     autoCursor = -1
@@ -845,6 +846,38 @@ Panel {
     }
   }
 
+  // Is @account shown in Claude Code's status line? Asked of swapkin per provider:
+  // the setting, and whether anything (ours or the user's own script) prints it.
+  readonly property bool canStatusline: !!provider && provider.statusline === true
+  property bool statuslineOn: false
+  function setStatusline(on) {
+    if (!canStatusline || statuslineSet.running) return
+    statuslineOn = on
+    statuslineSet.command = [accountTool, "-p", providerId, "statusline", on ? "on" : "off"]
+    statuslineSet.running = true
+  }
+  function readStatusline() {
+    if (!canStatusline || statuslineRead.running) return
+    statuslineRead.command = [accountTool, "-p", providerId, "statusline", "status"]
+    statuslineRead.running = true
+  }
+  onCanStatuslineChanged: readStatusline()
+  Process {
+    id: statuslineRead
+    stdout: StdioCollector {
+      waitForEnd: true
+      onStreamFinished: root.statuslineOn = text.trim() === "on"
+    }
+  }
+  Process {
+    id: statuslineSet
+    stderr: StdioCollector { id: statuslineErr; waitForEnd: true }
+    onExited: function(exitCode) {
+      if (exitCode !== 0) root.actionError = statuslineErr.text.replace(/^swapkin: /, "").trim()
+      root.readStatusline()
+    }
+  }
+
   Process {
     id: syncProcess
     command: [root.accountTool, "usage"]
@@ -890,7 +923,7 @@ Panel {
   function refocusKeys() { keyCatcher.forceActiveFocus() }
   function formatTokens(n) { return usage.formatTokenCount(n) }
   function renameAccount(name, text) {
-    renaming = ""
+    renaming = ""; addingAccount = false
     Qt.callLater(function() { keyCatcher.forceActiveFocus() })
     runAccountAction(["label", name, text])
   }
@@ -908,12 +941,33 @@ Panel {
   }
   Timer { id: forgetTimer; interval: 2000; onTriggered: root.forgetPending = "" }
 
-  // Signing in needs a terminal: the tool opens the provider's own login flow
-  // in a throwaway home and imports it once you are done.
+  // Adding asks for a name inside the panel first (addingAccount); only a
+  // valid, free name reaches the terminal, where the sign-in itself happens.
+  property bool addingAccount: false
+  function nameProblem(name) {
+    if (!/^[a-z0-9][a-z0-9_-]{0,31}$/.test(name))
+      return "Use a-z, 0-9, - and _ (for example: work, personal)."
+    if (name === "providers") return "'providers' is reserved."
+    for (var i = 0; i < accounts.length; i++)
+      if (accounts[i].name === name) return "'" + name + "' already exists."
+    return ""
+  }
+  function freeAccountName() {
+    var n = 2
+    while (nameProblem("account" + n) !== "") n++
+    return "account" + n
+  }
   function addAccount() {
     if (!root.provider) return
+    addingAccount = true
+  }
+  // Signing in needs a terminal: the tool opens the provider's own login flow
+  // in a throwaway home and imports it once you are done.
+  function addAccountNamed(name) {
+    if (!root.provider || nameProblem(name) !== "") return
+    addingAccount = false
     if (root.bar) root.bar.run("omarchy-launch-floating-terminal-with-presentation "
-      + accountTool + " -p " + root.provider.providerId + " add")
+      + accountTool + " -p " + root.provider.providerId + " add " + name)
     root.close()
   }
 
@@ -1056,6 +1110,7 @@ Panel {
         else if ((t === "s" || t === "S") && root.managing && root.canAutoSwitch) { root.modelCursor = -1; root.paceCursor = -1; root.autoCursor = root.autoCursor >= 0 ? -1 : 0 }
         else if ((t === "o" || t === "O") && root.settingsOpen && root.modelChips.length > 0) { root.paceCursor = -1; root.autoCursor = -1; root.modelCursor = root.modelCursor >= 0 ? -1 : 0 }
         else if (root.managing && t.length === 1 && "uUnNcCfFvV".indexOf(t) >= 0 && root.manageKey(t)) { }
+        else if ((t === "t" || t === "T") && !root.settingsOpen && !root.managing && root.canStatusline) root.setStatusline(!root.statuslineOn)
         else if (t === "r" || t === "R") root.syncNow()
         else if ((t === "a" || t === "A") && root.accounts.length > 1) root.switchToCandidate()
         else if ((t === "m" || t === "M") && root.canManage) root.toggleManage()
@@ -1586,6 +1641,62 @@ Panel {
                 }
               }
 
+              // ---- Account in Claude Code's status line (providers that support it) ----
+              Column {
+                visible: root.hasAccounts && !root.subView && root.canStatusline
+                width: parent.width
+                spacing: Style.space(4)
+
+                Item {
+                  width: parent.width
+                  implicitHeight: Math.max(statuslineLabel.implicitHeight, statuslineChoices.implicitHeight)
+
+                  Text {
+                    id: statuslineLabel
+                    anchors.left: parent.left
+                    anchors.verticalCenter: parent.verticalCenter
+                    textFormat: Text.PlainText
+                    text: "Show account in status line  (t)"
+                    color: root.foreground
+                    font.family: root.fontFamily
+                    font.pixelSize: Style.font.caption
+                  }
+                  Row {
+                    id: statuslineChoices
+                    anchors.right: parent.right
+                    anchors.verticalCenter: parent.verticalCenter
+                    spacing: Style.space(6)
+                    Repeater {
+                      model: ["On", "Off"]
+                      Button {
+                        required property var modelData
+                        required property int index
+                        text: modelData
+                        bordered: true
+                        selected: (index === 0) === root.statuslineOn
+                        foreground: root.foreground
+                        fontFamily: root.fontFamily
+                        fontSize: Style.font.caption
+                        horizontalPadding: Style.space(10)
+                        verticalPadding: Style.spacing.controlPaddingY
+                        onClicked: root.setStatusline(index === 0)
+                      }
+                    }
+                  }
+                }
+
+                Text {
+                  width: parent.width
+                  wrapMode: Text.WordWrap
+                  textFormat: Text.PlainText
+                  text: "Adds @" + (root.activeAccount ? root.activeAccount.name : "account")
+                    + " (the account in use) to the bottom line of Claude Code. Off removes it."
+                  color: root.dim
+                  font.family: root.fontFamily
+                  font.pixelSize: Style.font.caption
+                }
+              }
+
               // ---- Status ----
               BorderSurface {
                 visible: !!root.provider && (String(root.provider.usageStatusText || "") !== "" || root.provider.rateLimited === true)
@@ -1947,7 +2058,7 @@ Panel {
               ? [{ k: "↑ ↓ ← →", l: "move" }, { k: "enter", l: "change" }, { k: "s", l: "back" }]
               : root.modelCursor >= 0
               ? [{ k: "↑ ↓ ← →", l: "move" }, { k: "enter", l: "show/hide" }, { k: "o", l: "back" }]
-              : Models.keyHints(root.hasAccounts, root.canManage, root.managing, root.canAutoSwitch, root.settingsOpen, root.canSwitchAccounts)
+              : Models.keyHints(root.hasAccounts, root.canManage, root.managing, root.canAutoSwitch, root.settingsOpen, root.canSwitchAccounts, root.canStatusline)
 
             Row {
               required property var modelData

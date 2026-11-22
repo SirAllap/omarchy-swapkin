@@ -176,6 +176,7 @@ it back off. Nothing it does ever reads or writes a real login.
 | `swapkin check` | One watchdog pass: refresh, warn, auto-switch if on |
 | `swapkin cost` | Today's tokens priced at API rates, as JSON |
 | `swapkin statusline [--plain]` | The active account, coloured, for a status line |
+| `swapkin statusline on\|off\|status` | Show or hide it in Claude Code's status line |
 
 ## Settings
 
@@ -258,22 +259,59 @@ time, from that account's own saved login.
 
 ## Status line
 
-Claude Code's status line is yours, so Swapkin does not touch it. It does print
-a ready-made segment — the active account, in that account's colour:
+Swapkin can put the active account, in its colour, in Claude Code's status line.
+Use the panel row "Show account in status line" (On/Off, key `t`), or:
+
+```bash
+swapkin statusline on      # show it
+swapkin statusline off     # hide it
+swapkin statusline status  # on or off
+```
+
+Off is a Swapkin setting that `swapkin statusline` itself obeys: it prints
+nothing. So Off works however you wired it, even by hand in your own script.
+On wires `settings.json` only when nothing calls `swapkin statusline` yet:
+
+- No status line yet: it sets one that runs `swapkin statusline`.
+- You already have one that does not call it: it is never replaced. `statusLine`
+  points at a small script in Swapkin's data dir that runs your original command,
+  then prints the account on the next line. Off puts your setting back as it was.
+- Your script already calls `swapkin statusline`: nothing is rewired.
+
+Wiring edits `~/.claude/settings.json` (or `$CLAUDE_CONFIG_DIR/settings.json`)
+with `jq`, through a temp file and a rename, after copying it to
+`settings.json.swapkin-bak`. Running it twice changes nothing. `install` and
+`uninstall` do only the wiring. The row shows only for providers that support
+it (Claude today).
+
+The segment itself, for your own script:
 
 ```bash
 swapkin statusline            # coloured, for a terminal
 swapkin statusline --plain    # just @work
-```
-
-Add it to the script behind `statusLine` in your Claude Code settings:
-
-```bash
 printf '\n'; swapkin statusline
 ```
 
 A line of its own survives a narrow or split pane, where a long first line is
 cut off.
+
+### Codex
+
+Codex has no custom status line: `[tui].status_line` and `[tui].terminal_title`
+take only built-in items, never a command. Put the account in the terminal
+title instead, with a wrapper in your shell rc:
+
+```bash
+codex() { printf '\033]0;codex %s\007' "$(swapkin -p codex statusline --plain)"; command codex "$@"; }
+```
+
+Codex may rewrite the title once it starts. To keep ours, set this in
+`~/.codex/config.toml`:
+
+```toml
+[tui]
+terminal_title = []
+```
 
 ## Limitations
 
