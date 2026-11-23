@@ -696,7 +696,7 @@ Column {
   PanelSectionHeader {
     visible: page.host.canAutoSwitch
     width: parent.width
-    text: "AUTO-SWITCH · CLAUDE ONLY"
+    text: "AUTO-SWITCH · CLAUDE AND CODEX"
     foreground: page.host.foreground
     fontFamily: page.host.fontFamily
   }
