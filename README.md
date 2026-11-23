@@ -15,9 +15,9 @@ it, so settings, sessions, skills, hooks and MCP logins are untouched.
 
 ## What it does
 
-- **A wide popover with two columns.** Providers on the left, the one you picked
-  on the right, and a "next message is paid by" strip on top. On a screen tall
-  enough it never scrolls; on a shorter one the columns scroll inside it.
+- **One popover.** The big usage ring and a row of provider tiles on top, then
+  "Paid by <account>", the account tiles and the usage below. On a screen tall
+  enough it never scrolls; on a shorter one it scrolls inside.
 - **Switch accounts from the bar.** Every account is a card. Move over one to
   preview its limits, then switch. Keys: `↑` `↓` provider, `←` `→` account,
   `a` switch, `m` manage (inside it: `u` use, `n` rename, `c` colour, `f` forget, `v` save the current login), `,` settings (`↑ ↓ ← →` change a row, `w` weekly pace, `o` models), `r` sync (fresh usage for every saved account).
@@ -217,8 +217,10 @@ The rules, so it never surprises you:
 - Stale or unreadable figures mean it does nothing. It takes the same lock as
   `swapkin use`, so it waits for a switch in progress.
 - Each decision is logged to `~/.local/state/swapkin/autoswitch.log` (last 200 lines).
-- Claude only, like `swapkin check`. Codex and other cold providers need a new
-  sign-in to switch, so they are never switched automatically.
+- Claude and Codex, with 2+ saved accounts, both run by `swapkin check` and sharing
+  these settings. A Codex switch reaches new sessions only; open ones keep their
+  account. Other providers are never switched automatically. The settings are
+  edited in the manage screen while Claude Code is selected.
 
 The watchdog interval and the weekly budget are widget settings:
 
